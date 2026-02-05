@@ -1,0 +1,1 @@
+import{j as r}from"./index-C_KJhDjU.js";const o=({children:e,title:s,className:a,style:p})=>r.jsxs("div",{style:p,className:a,children:[r.jsx("span",{className:"wrapper-label",children:s}),e]});export{o as W};

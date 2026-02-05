@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Worbit Sniper V11.0 - Lectura de Gráfico",
+  "version": "11.0",
+  "description": "Bot de Trading con Lectura Directa del Gráfico, Múltiples Fuentes de Datos",
+  "icons": {
+    "16": "icon.png",
+    "32": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
+  "action": {
+    "default_title": "Abrir Sniper V11",
+    "default_icon": "icon.png"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://broker.worbit.io/*",
+    "https://*.mybroker.dev/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["injected.js"],
+      "matches": ["https://broker.worbit.io/*"]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://broker.worbit.io/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

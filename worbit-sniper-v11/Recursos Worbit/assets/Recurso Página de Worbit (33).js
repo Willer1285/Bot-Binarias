@@ -1,0 +1,1 @@
+import{L as e,H as o,F as r,C as a}from"./layout-xX9q6Cyg.js";import{S as n,a as s}from"./Sider-By1_nIty.js";const t=e;t.Header=o;t.Footer=r;t.Content=a;t.Sider=n;t._InternalSiderContext=s;export{t as L};

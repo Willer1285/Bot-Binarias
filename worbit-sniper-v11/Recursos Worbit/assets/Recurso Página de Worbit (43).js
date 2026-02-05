@@ -1,0 +1,1 @@
+import{j as m}from"./index-C_KJhDjU.js";import{s as r}from"./styles.module-OCQ2BB3f.js";const n=({src:o,height:s=45,className:t})=>m.jsx("img",{alt:"logo",src:o,height:s,className:`${t} ${r.logo}`});export{n as L};

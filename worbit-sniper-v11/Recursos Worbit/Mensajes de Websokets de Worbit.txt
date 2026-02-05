@@ -1,0 +1,105 @@
+URL 1
+wss://symbol-prices-api.mybroker.dev/socket.io/?EIO=4&transport=websocket
+Mensaje: WebSocket is closed before the connection is established.
+
+URL 2
+wss://symbol-prices-api.mybroker.dev/socket.io/?EIO=4&transport=websocket
+Mensaje: 42/symbol-prices,["message", {channel: "mybroker-11:ETHUSDT.OTC", event: "symbol.price.update",…}]
+0
+: 
+"message"
+1
+: 
+{channel: "mybroker-11:ETHUSDT.OTC", event: "symbol.price.update",…}
+channel
+: 
+"mybroker-11:ETHUSDT.OTC"
+data
+: 
+{openPrice: 3281.62, slot: "mybroker-11", pair: "ETHUSDT.OTC", closePrice: 3281.64, highPrice: 3281.64,…}
+closePrice
+: 
+3281.64
+highPrice
+: 
+3281.64
+lowPrice
+: 
+3281.62
+openPrice
+: 
+3281.62
+pair
+: 
+"ETHUSDT.OTC"
+slot
+: 
+"mybroker-11"
+time
+: 
+1764550555061
+type
+: 
+"otc"
+volume
+: 
+34.91
+event
+: 
+"symbol.price.update"
+
+URL 3
+wss://broker-api.mybroker.dev/socket.io/?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjAxS0FFVFBWQ0JLOUs5UEpCWE5RREtLTlo5IiwibGFuZ3VhZ2UiOiJlcyIsIm5hbWUiOiJXaWxsZXIgUGFjaGVjbyBBbHZhcmFkbyIsImltcGVyc29uYXRlIjpmYWxzZSwibG9naW5JZCI6IjAxS0I4VkFFTVFWUkhXQkVFUEJNUUFNMzNIIiwiZW1haWwiOiJ3aWx0cmFkZXIxMjg1QGdtYWlsLmNvbSIsInRlbmFudElkIjoiMDFKQzZRWVFRVFNERzNQV1JSN1c3R0haUUIiLCJhY3RpdmUiOnRydWUsImJhbm5lZCI6ZmFsc2UsImlhdCI6MTc2NDQ1NDkwNiwiZXhwIjoxNzY0NjI3NzA2LCJpc3MiOiJBVVRILVRSQURFLU9QVElPTiJ9.qxRQ3AgfeTSOtNKKZTAkK3_gZ4SeVNVPsufMt_8Qq24&EIO=4&transport=websocket
+Mensaje: 42/user,["timeSync", "time"]
+0
+: 
+"timeSync"
+1
+: 
+"time"
+
+URL 4
+wss://symbol-prices-api.mybroker.dev/socket.io/?EIO=4&transport=websocket
+Mensaje: 42/symbol-prices,["message", {channel: "mybroker-11:ETHUSDT.OTC", event: "symbol.price.update",…}]
+0
+: 
+"message"
+1
+: 
+{channel: "mybroker-11:ETHUSDT.OTC", event: "symbol.price.update",…}
+channel
+: 
+"mybroker-11:ETHUSDT.OTC"
+data
+: 
+{openPrice: 3285.72, slot: "mybroker-11", pair: "ETHUSDT.OTC", closePrice: 3285.71, highPrice: 3285.72,…}
+closePrice
+: 
+3285.71
+highPrice
+: 
+3285.72
+lowPrice
+: 
+3285.71
+openPrice
+: 
+3285.72
+pair
+: 
+"ETHUSDT.OTC"
+slot
+: 
+"mybroker-11"
+time
+: 
+1764550756436
+type
+: 
+"otc"
+volume
+: 
+86.06
+event
+: 
+"symbol.price.update"

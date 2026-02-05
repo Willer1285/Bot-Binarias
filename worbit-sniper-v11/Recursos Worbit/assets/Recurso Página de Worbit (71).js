@@ -1,0 +1,1 @@
+import{d as r,aW as o}from"./index-C_KJhDjU.js";const c=["utm_source","utm_medium","utm_campaign","utm_term","utm_content"],i=r()(o((t,a)=>({utms:{},setUtmsFromUrl:m=>{const s={};c.forEach(e=>{const u=m.get(e);u&&(s[e]=u)}),Object.keys(s).length>0&&t({utms:s})},getUtm:m=>a().utms[m],clearUtms:()=>t({utms:{}})}),{name:"utm-storage",partialize:t=>({utms:t.utms})}));export{i as u};
