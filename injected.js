@@ -1178,7 +1178,90 @@ function checkWarmupStatus() {
   return ready;
 }
 
-// ... (Other functions: executeTrade, logMonitor, etc. need to be present)
+function logMonitor(msg, type = 'info') {
+  if (!DOM.monitorBox) return;
+  const now = new Date();
+  const time = now.toTimeString().slice(0,8);
+  const color = type === 'success' ? 'var(--primary)' : type === 'blocked' ? 'var(--danger)' : type === 'pattern' ? '#f1c40f' : 'var(--text-muted)';
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  line.innerHTML = `<span style="color:var(--text-muted)">${time}</span> <span style="color:${color}">${msg}</span>`;
+  DOM.monitorBox.appendChild(line);
+  DOM.monitorBox.scrollTop = DOM.monitorBox.scrollHeight;
+}
+
+function startHealthCheck() {
+  if (healthCheckInterval) clearInterval(healthCheckInterval);
+  healthCheckInterval = setInterval(() => {
+    const now = Date.now();
+    if (now - lastTickTime > DATA_TIMEOUT && wsConnected) {
+      wsConnected = false;
+      updateConnectionUI(false);
+      logMonitor('Sin datos - verificando...', 'blocked');
+      scheduleReconnect();
+    }
+  }, HEALTH_CHECK_INTERVAL);
+}
+
+function startBot() {
+  if (isRunning) return;
+  isRunning = true;
+  startTime = Date.now();
+  initialBalance = balance;
+  sessionStats = { w: 0, l: 0 };
+  mgLevel = 0;
+  tradeExecutedThisCandle = false;
+  lastTradeType = null;
+  activeMartingaleTrade = null;
+  pendingSignal = null;
+  chartAccessMethod = 'none';
+  
+  setupWebSocketInterceptor();
+  startHealthCheck();
+  
+  if (config.useChartData) {
+    if(chartSyncInterval) clearInterval(chartSyncInterval);
+    chartSyncInterval = setInterval(syncWithChart, CHART_SYNC_INTERVAL);
+  }
+  
+  if (DOM.mainBtn) {
+    DOM.mainBtn.textContent = 'DETENER';
+    DOM.mainBtn.classList.add('btn-stop');
+  }
+  
+  logMonitor('🟢 Sistema iniciado', 'success');
+  
+  if (currentPair) {
+    loadHistoricalData(currentPair).then(hist => {
+      if (hist.length > 0) {
+        candles = hist;
+        chartCandles = hist.slice();
+        processed = hist.length;
+      }
+    });
+  }
+}
+
+function stopBot() {
+  isRunning = false;
+  if (healthCheckInterval) clearInterval(healthCheckInterval);
+  if (chartSyncInterval) clearInterval(chartSyncInterval);
+  if (wsReconnectTimeout) clearTimeout(wsReconnectTimeout);
+  
+  if (DOM.mainBtn) {
+    DOM.mainBtn.textContent = 'INICIAR';
+    DOM.mainBtn.classList.remove('btn-stop');
+  }
+  
+  logMonitor('🔴 Sistema detenido', 'blocked');
+}
+
+function runDiagnostics() {
+  logMonitor('--- DIAGNÓSTICO ---', 'info');
+  logMonitor(`Saldo: $${balance.toFixed(2)} (${isDemo ? 'DEMO' : 'REAL'})`, balance > 0 ? 'success' : 'blocked');
+  logMonitor(`WS: ${wsConnected ? 'ON' : 'OFF'}`, wsConnected ? 'success' : 'blocked');
+  logMonitor(`Velas: ${candles.length}`, 'info');
+}
 
 // ============= MENSAJES =============
 window.addEventListener('message', e => {
