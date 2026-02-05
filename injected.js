@@ -30,7 +30,8 @@ let config = {
   riskPct: 1,
   mgMaxSteps: 3,
   mgFactor: 2.0,
-  entrySec: 59,
+  entrySec: 57,           // Segundo de entrada (57 = 3 segundos antes del cierre)
+  entryWindowSec: 3,      // Duración de la ventana de entrada en segundos
   timeOffset: 0,
   useChartData: true, // NUEVO: Usar datos del gráfico cuando estén disponibles
   stopConfig: {
@@ -67,6 +68,10 @@ let initialBalance = 0;
 let lastTickTime = 0;
 let wsConnected = false;
 let lastWsData = null;
+let lastTradeTime = 0;             // Timestamp del último trade ejecutado
+let consecutiveLosses = 0;         // Contador de pérdidas consecutivas
+const MIN_TRADE_INTERVAL = 5000;   // Mínimo 5 segundos entre trades
+const MAX_CONSECUTIVE_LOSSES = 5;  // Máximo de pérdidas consecutivas antes de pausa
 
 // NUEVO: Estado del acceso al gráfico
 let chartAccessMethod = 'none'; // 'tradingview', 'zustand', 'api', 'websocket'
@@ -556,6 +561,7 @@ function saveConfigToStorage() {
     mgMaxSteps: config.mgMaxSteps,
     mgFactor: config.mgFactor,
     entrySec: config.entrySec,
+    entryWindowSec: config.entryWindowSec,
     timeOffset: config.timeOffset,
     useChartData: config.useChartData,
     stopConfig: config.stopConfig
@@ -893,7 +899,8 @@ function updateSignalUI(sec, key) {
     if (config.invertTrade) type = type === 'call' ? 'put' : 'call';
     
     const triggerSec = 60 - config.entrySec;
-    if (sec <= triggerSec && sec > (triggerSec - 5)) {
+    const windowSize = config.entryWindowSec || 3; // Ventana de entrada configurable
+    if (sec <= triggerSec && sec > (triggerSec - windowSize)) {
       DOM.signalBox.className = type === 'call' ? 'sig-entry-call' : 'sig-entry-put';
       DOM.signalBox.innerHTML = `
         <div style="font-size:16px;font-weight:800">${type === 'call' ? '▲ COMPRA' : '▼ VENTA'}</div>
@@ -947,30 +954,128 @@ function setTradeAmount(targetAmount) {
 }
 
 function executeTrade(type) {
-  if (!config.autoTrade) return false;
-  
+  // Validar que autoTrade esté activo
+  if (!config.autoTrade) {
+    logMonitor('AutoTrade desactivado', 'info');
+    return false;
+  }
+
+  // Validar tipo de trade
+  if (type !== 'call' && type !== 'put') {
+    logMonitor(`Tipo de trade inválido: ${type}`, 'blocked');
+    return false;
+  }
+
+  // SEGURIDAD: Validar conexión WebSocket
+  if (!wsConnected) {
+    logMonitor('⚠️ Sin conexión WebSocket - Trade cancelado', 'blocked');
+    return false;
+  }
+
+  // SEGURIDAD: Evitar trades muy rápidos (anti-spam)
+  const now = Date.now();
+  if (now - lastTradeTime < MIN_TRADE_INTERVAL) {
+    const waitTime = Math.ceil((MIN_TRADE_INTERVAL - (now - lastTradeTime)) / 1000);
+    logMonitor(`⏳ Espera ${waitTime}s entre trades`, 'info');
+    return false;
+  }
+
+  // SEGURIDAD: Pausa automática por pérdidas consecutivas
+  if (consecutiveLosses >= MAX_CONSECUTIVE_LOSSES) {
+    logMonitor(`⛔ Pausa automática: ${consecutiveLosses} pérdidas consecutivas`, 'blocked');
+    logMonitor('Desactiva y activa AutoTrade para continuar', 'info');
+    return false;
+  }
+
+  // Validar balance mínimo
+  if (balance <= 0) {
+    logMonitor('Balance insuficiente para operar', 'blocked');
+    return false;
+  }
+
+  // Calcular y configurar monto
   calcAmount();
-  setTradeAmount(currentAmt);
-  
+
+  // Validar monto mínimo
+  if (currentAmt < 1) {
+    logMonitor('Monto mínimo es $1.00', 'blocked');
+    currentAmt = 1;
+  }
+
+  // Validar que el monto no exceda el balance
+  if (currentAmt > balance) {
+    logMonitor(`Monto ajustado al balance: $${balance.toFixed(2)}`, 'info');
+    currentAmt = balance;
+  }
+
+  // SEGURIDAD: Advertencia en cuenta real
+  if (!isDemo && currentAmt > balance * 0.1) {
+    logMonitor(`⚠️ CUENTA REAL: Trade de ${((currentAmt/balance)*100).toFixed(1)}% del balance`, 'pattern');
+  }
+
+  // Configurar monto en la UI del broker
+  const amountSet = setTradeAmount(currentAmt);
+  if (!amountSet) {
+    logMonitor('No se pudo configurar el monto', 'blocked');
+  }
+
+  // Actualizar timestamp del último trade
+  lastTradeTime = now;
+
   logMonitor(`Ejecutando ${type.toUpperCase()} - $${currentAmt.toFixed(2)}`, 'success');
-  
-  setTimeout(() => {
+
+  // Ejecutar el trade con retry logic
+  executeTradeWithRetry(type, 3);
+  return true;
+}
+
+function executeTradeWithRetry(type, maxRetries) {
+  let retries = 0;
+
+  const attemptClick = () => {
     try {
+      // Selectores para los botones del broker Worbit
+      const selectors = type === 'call'
+        ? ['.buy-button', '[class*="buy"]', 'button:has-text("ARRIBA")']
+        : ['.sell-button', '[class*="sell"]', 'button:has-text("ABAJO")'];
+
       let targetButton = null;
-      if (type === 'call') targetButton = document.querySelector('.buy-button');
-      else if (type === 'put') targetButton = document.querySelector('.sell-button');
-      
-      if (targetButton) {
-        targetButton.click();
-        logMonitor(`Click: ${type.toUpperCase()}`, 'success');
+
+      // Intentar con cada selector
+      for (const selector of selectors) {
+        try {
+          targetButton = document.querySelector(selector);
+          if (targetButton && !targetButton.disabled) break;
+        } catch (e) {
+          // Selector inválido, continuar con el siguiente
+        }
+      }
+
+      if (targetButton && !targetButton.disabled) {
+        // Agregar pequeño delay aleatorio para parecer más humano
+        const delay = 50 + Math.random() * 100;
+        setTimeout(() => {
+          targetButton.click();
+          logMonitor(`✅ Trade ejecutado: ${type.toUpperCase()}`, 'success');
+        }, delay);
+        return true;
+      } else if (retries < maxRetries) {
+        retries++;
+        logMonitor(`Reintentando click (${retries}/${maxRetries})...`, 'info');
+        setTimeout(attemptClick, 200);
+        return false;
       } else {
-        logMonitor(`Botón ${type} no encontrado`, 'blocked');
+        logMonitor(`❌ Botón ${type.toUpperCase()} no encontrado después de ${maxRetries} intentos`, 'blocked');
+        return false;
       }
     } catch (e) {
-      logMonitor('Error en click', 'blocked');
+      logMonitor(`❌ Error ejecutando trade: ${e.message}`, 'blocked');
+      return false;
     }
-  }, 100 + Math.random() * 100);
-  return true;
+  };
+
+  // Iniciar después de un pequeño delay
+  setTimeout(attemptClick, 100);
 }
 
 // ============= VERIFICACIÓN DE RESULTADOS =============
@@ -986,10 +1091,12 @@ function checkTradeResults(candle) {
       if (isWin) {
         stats.w++;
         sessionStats.w++;
+        consecutiveLosses = 0;  // Resetear contador de pérdidas consecutivas
         mgLevel = 0;
         activeMartingaleTrade = null;
         logMonitor('✅ GANADA', 'success');
       } else if (!isDraw) {
+        consecutiveLosses++;  // Incrementar contador de pérdidas consecutivas
         if (config.useMartingale) {
           const stopLossTrigger = (t.type === 'call' && isStrongMomentum(candles, 'bearish')) ||
                                   (t.type === 'put' && isStrongMomentum(candles, 'bullish'));
@@ -1014,6 +1121,10 @@ function checkTradeResults(candle) {
           stats.l++;
           sessionStats.l++;
           logMonitor('❌ PERDIDA', 'blocked');
+        }
+        // Advertir sobre pérdidas consecutivas
+        if (consecutiveLosses >= 3) {
+          logMonitor(`⚠️ ${consecutiveLosses} pérdidas consecutivas`, 'pattern');
         }
       } else {
         logMonitor('↔️ EMPATE', 'info');
@@ -1847,7 +1958,13 @@ function initSystem() {
     if (DOM.swAuto) DOM.swAuto.onclick = function() {
       config.autoTrade = !config.autoTrade;
       this.classList.toggle('active', config.autoTrade);
-      logMonitor(`AutoTrade: ${config.autoTrade ? 'ON' : 'OFF'}`);
+      // Resetear contador de pérdidas consecutivas al activar AutoTrade
+      if (config.autoTrade) {
+        consecutiveLosses = 0;
+        logMonitor('AutoTrade: ON - Contador de pérdidas reseteado', 'success');
+      } else {
+        logMonitor('AutoTrade: OFF', 'info');
+      }
       saveConfigToStorage();
     };
     
