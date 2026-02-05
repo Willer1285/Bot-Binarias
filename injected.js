@@ -1,18 +1,31 @@
-// injected.js - WORBIT SNIPER V11.0 - LECTURA DIRECTA DEL GRÁFICO
-// Características: Lectura de velas del gráfico, TradingView integration, Múltiples fuentes de datos
+// injected.js - WORBIT SNIPER V12.0 - ESTRATEGIA BLINDADA
+// Características: Sistema de warmup, EMA/ATR filters, Martingala inteligente, Score de señales
 (function() {
 'use strict';
-console.log('%c WORBIT SNIPER V11.0 LOADING...', 'background: #00e676; color: #000; font-size: 14px; padding: 5px;');
+console.log('%c WORBIT SNIPER V12.0 LOADING...', 'background: #00e676; color: #000; font-size: 14px; padding: 5px;');
 
 // ============= CONSTANTES =============
-const VERSION = '11.0';
-const TARGET_CANDLES = 3;
+const VERSION = '12.0';
+const TARGET_CANDLES = 3;           // Mínimo para patrones básicos
+const TARGET_CANDLES_FULL = 21;     // Mínimo para sistema completo (EMA 21)
 const MAX_CANDLES = 200;
 const MAX_LOGS = 20;
 const HEALTH_CHECK_INTERVAL = 3000;
 const DATA_TIMEOUT = 8000;
-const RECONNECT_DELAY = 5000;
-const CHART_SYNC_INTERVAL = 1000; // Sincronizar con gráfico cada segundo
+const CHART_SYNC_INTERVAL = 1000;
+
+// Constantes de reconexión WebSocket (backoff exponencial rápido)
+const WS_RECONNECT_DELAYS = [100, 300, 500, 1000, 2000];
+const WS_MAX_RECONNECT_ATTEMPTS = 10;
+
+// Constantes de EMA y ATR
+const EMA_FAST_PERIOD = 8;
+const EMA_SLOW_PERIOD = 21;
+const ATR_PERIOD = 14;
+
+// Constantes de Score
+const MIN_SCORE_TO_TRADE = 6;       // Score mínimo para operar (de 10)
+const MIN_SCORE_MARTINGALE = 5;     // Score mínimo para martingala
 
 // ============= ESTADO GLOBAL =============
 let DOM = {};
@@ -79,10 +92,33 @@ let tvWidgetRef = null;
 let chartSyncInterval = null;
 let lastChartSync = 0;
 
+// ============= NUEVO V12: SISTEMA DE WARMUP =============
+let systemWarmupLevel = 0;         // 0-100% de preparación
+let isSystemWarmedUp = false;      // True cuando está al 100%
+
+// ============= NUEVO V12: INDICADORES TÉCNICOS =============
+let emaFast = null;                // EMA 8
+let emaSlow = null;                // EMA 21
+let atrValue = null;               // ATR 14
+let atrAverage = null;             // Promedio de ATR para comparar volatilidad
+let currentTrend = 'neutral';      // 'bullish', 'bearish', 'neutral'
+let volatilityLevel = 'normal';    // 'low', 'normal', 'high'
+
+// ============= NUEVO V12: WEBSOCKET ROBUSTO =============
+let wsReconnectAttempt = 0;
+let activeWebSocket = null;
+let wsHeartbeatInterval = null;
+let lastWsMessageTime = 0;
+
+// ============= NUEVO V12: MONITOR DE TRADE EN TIEMPO REAL =============
+let activeTradeMonitor = null;     // Trade activo siendo monitoreado
+let tradeProgressData = [];        // Historial de precios durante el trade
+
 // Intervalos
 let tickerInterval = null;
 let sessionInterval = null;
 let healthCheckInterval = null;
+let warmupInterval = null;
 
 // ============= NUEVO: ACCESO AL GRÁFICO =============
 
@@ -375,56 +411,113 @@ function getSelectedSymbol() {
   return null;
 }
 
-// ============= WEBSOCKET INTERCEPTOR MEJORADO =============
+// ============= WEBSOCKET INTERCEPTOR MEJORADO V12 =============
 let originalWebSocket = null;
 let wsReconnectTimeout = null;
+let lastWsUrl = null;
+let lastWsProtocols = null;
 
 function setupWebSocketInterceptor() {
   if (originalWebSocket) return;
-  
+
   originalWebSocket = window.WebSocket;
-  
+
   window.WebSocket = function(url, protocols) {
     const ws = new originalWebSocket(url, protocols);
-    
+
+    // V12: Guardar URL y protocolos para reconexión
+    if (url.includes('symbol-prices')) {
+      lastWsUrl = url;
+      lastWsProtocols = protocols;
+      activeWebSocket = ws;
+    }
+
     ws.addEventListener('open', () => {
       if (url.includes('symbol-prices')) {
         wsConnected = true;
         lastTickTime = Date.now();
-        logMonitor('WebSocket conectado', 'success');
+        lastWsMessageTime = Date.now();
+        wsReconnectAttempt = 0; // V12: Resetear contador de intentos
+        logMonitor('✓ WebSocket conectado', 'success');
         updateConnectionUI(true);
+        startWsHeartbeat(); // V12: Iniciar monitoreo de heartbeat
       }
     });
-    
+
     ws.addEventListener('close', (event) => {
       if (url.includes('symbol-prices')) {
         wsConnected = false;
-        logMonitor(`WebSocket cerrado (${event.code})`, 'blocked');
+        activeWebSocket = null;
+        logMonitor(`⚠ WebSocket cerrado (${event.code})`, 'blocked');
         updateConnectionUI(false);
-        scheduleReconnect();
+        scheduleReconnect(); // V12: Reconexión instantánea
       }
     });
-    
+
     ws.addEventListener('error', () => {
       if (url.includes('symbol-prices')) {
-        logMonitor('Error WebSocket', 'blocked');
+        logMonitor('⚠ Error WebSocket', 'blocked');
         updateConnectionUI(false);
       }
     });
-    
+
     ws.addEventListener('message', (event) => {
+      lastWsMessageTime = Date.now(); // V12: Actualizar timestamp de último mensaje
       processWebSocketMessage(event.data);
     });
-    
+
     return ws;
   };
-  
+
   window.WebSocket.prototype = originalWebSocket.prototype;
   Object.keys(originalWebSocket).forEach(key => {
     if (key !== 'prototype') {
       try { window.WebSocket[key] = originalWebSocket[key]; } catch(e) {}
     }
   });
+
+  // V12: Iniciar monitoreo de health del WebSocket
+  setInterval(checkWsHealth, 3000);
+}
+
+/**
+ * V12: Monitorea la salud del WebSocket y detecta conexiones zombies
+ */
+function checkWsHealth() {
+  if (!isRunning || !wsConnected) return;
+
+  const timeSinceLastMessage = Date.now() - lastWsMessageTime;
+
+  // Si no hay mensajes en 10 segundos, la conexión puede estar muerta
+  if (timeSinceLastMessage > 10000) {
+    logMonitor('⚠ WebSocket sin datos - Verificando...', 'info');
+
+    // Si el WebSocket existe pero no envía datos, cerrarlo y reconectar
+    if (activeWebSocket && activeWebSocket.readyState === WebSocket.OPEN) {
+      logMonitor('Forzando reconexión...', 'info');
+      try {
+        activeWebSocket.close();
+      } catch (e) {}
+    }
+  }
+}
+
+/**
+ * V12: Inicia el heartbeat del WebSocket para detectar desconexiones rápidamente
+ */
+function startWsHeartbeat() {
+  if (wsHeartbeatInterval) clearInterval(wsHeartbeatInterval);
+
+  wsHeartbeatInterval = setInterval(() => {
+    if (!wsConnected || !activeWebSocket) return;
+
+    // Verificar si el WebSocket sigue abierto
+    if (activeWebSocket.readyState !== WebSocket.OPEN) {
+      wsConnected = false;
+      updateConnectionUI(false);
+      scheduleReconnect();
+    }
+  }, 1000);
 }
 
 function processWebSocketMessage(data) {
@@ -464,22 +557,102 @@ function processWebSocketMessage(data) {
   } catch (e) {}
 }
 
+/**
+ * V12: Sistema de reconexión instantánea con backoff exponencial
+ * No recarga la página, crea una nueva conexión WebSocket directamente
+ */
 function scheduleReconnect() {
   if (wsReconnectTimeout) return;
   if (!isRunning) return;
-  
+
+  // Determinar delay basado en el intento actual
+  const delayIndex = Math.min(wsReconnectAttempt, WS_RECONNECT_DELAYS.length - 1);
+  const delay = WS_RECONNECT_DELAYS[delayIndex];
+
   wsReconnectTimeout = setTimeout(() => {
     wsReconnectTimeout = null;
-    if (wsConnected) return;
-    
-    logMonitor('Intentando reconexión...', 'info');
-    const chartFrame = document.querySelector('iframe[src*="chart"]');
-    if (chartFrame) {
-      try {
-        chartFrame.contentWindow.location.reload();
-      } catch(e) {}
+    if (wsConnected) {
+      wsReconnectAttempt = 0;
+      return;
     }
-  }, RECONNECT_DELAY);
+
+    wsReconnectAttempt++;
+    logMonitor(`🔄 Reconectando (${wsReconnectAttempt}/${WS_MAX_RECONNECT_ATTEMPTS})...`, 'info');
+
+    // Si excedemos el máximo de intentos, usar método de fallback
+    if (wsReconnectAttempt > WS_MAX_RECONNECT_ATTEMPTS) {
+      logMonitor('⚠ Máximo de intentos - Recargando gráfico...', 'blocked');
+      wsReconnectAttempt = 0;
+      forceChartReconnect();
+      return;
+    }
+
+    // V12: Intentar reconexión directa sin recargar página
+    attemptDirectReconnect();
+
+  }, delay);
+}
+
+/**
+ * V12: Intenta reconectar directamente creando un nuevo WebSocket
+ */
+function attemptDirectReconnect() {
+  // Método 1: Si tenemos la URL guardada, intentar reconectar directamente
+  if (lastWsUrl && originalWebSocket) {
+    try {
+      logMonitor('Intentando conexión directa...', 'info');
+      const newWs = new window.WebSocket(lastWsUrl, lastWsProtocols);
+      // El interceptor manejará la conexión automáticamente
+      return;
+    } catch (e) {
+      logMonitor('Conexión directa fallida', 'blocked');
+    }
+  }
+
+  // Método 2: Forzar reconexión del socket.io subyacente
+  try {
+    const socketManager = window.__SOCKET_MANAGER__ || window.io?.Manager?._managers;
+    if (socketManager) {
+      Object.values(socketManager).forEach(manager => {
+        if (manager?.engine?.close) {
+          manager.engine.close();
+          setTimeout(() => manager.open?.(), 100);
+        }
+      });
+      return;
+    }
+  } catch (e) {}
+
+  // Método 3: Disparar evento de visibilidad para forzar reconexión
+  try {
+    document.dispatchEvent(new Event('visibilitychange'));
+  } catch (e) {}
+
+  // Si nada funciona, programar otro intento
+  if (wsReconnectAttempt < WS_MAX_RECONNECT_ATTEMPTS) {
+    scheduleReconnect();
+  }
+}
+
+/**
+ * V12: Método de fallback - recarga el iframe del gráfico
+ */
+function forceChartReconnect() {
+  const chartFrame = document.querySelector('iframe[src*="chart"]');
+  if (chartFrame) {
+    try {
+      chartFrame.contentWindow.location.reload();
+    } catch(e) {
+      // Si no podemos recargar el iframe, intentar recrearlo
+      const parent = chartFrame.parentNode;
+      const src = chartFrame.src;
+      chartFrame.remove();
+      const newFrame = document.createElement('iframe');
+      newFrame.src = src;
+      newFrame.style.cssText = chartFrame.style.cssText;
+      parent?.appendChild(newFrame);
+    }
+  }
 }
 
 function updateConnectionUI(connected) {
@@ -679,7 +852,7 @@ function isStrongMomentum(arr, type) {
   const prev = arr[arr.length - 2];
   const prev2 = arr[arr.length - 3];
   const avgBody = getAvgBody(arr);
-  
+
   if (type === 'bearish') {
     return isRed(last) && isRed(prev) && isRed(prev2) && getBody(last) > avgBody;
   }
@@ -689,35 +862,285 @@ function isStrongMomentum(arr, type) {
   return false;
 }
 
-// ============= DETECCIÓN DE SEÑALES (MEJORADA) =============
+// ============= NUEVO V12: CÁLCULO DE INDICADORES TÉCNICOS =============
+
+/**
+ * Calcula EMA (Exponential Moving Average)
+ * @param {Array} candles - Array de velas
+ * @param {number} period - Período de la EMA
+ * @returns {number|null} - Valor de EMA o null si no hay suficientes datos
+ */
+function calculateEMA(candles, period) {
+  if (!candles || candles.length < period) return null;
+
+  const k = 2 / (period + 1);
+  let ema = candles[0].c; // Iniciar con el primer cierre
+
+  for (let i = 1; i < candles.length; i++) {
+    ema = candles[i].c * k + ema * (1 - k);
+  }
+
+  return ema;
+}
+
+/**
+ * Calcula ATR (Average True Range)
+ * @param {Array} candles - Array de velas
+ * @param {number} period - Período del ATR (default 14)
+ * @returns {number|null} - Valor de ATR o null si no hay suficientes datos
+ */
+function calculateATR(candles, period = ATR_PERIOD) {
+  if (!candles || candles.length < period + 1) return null;
+
+  const trueRanges = [];
+
+  for (let i = 1; i < candles.length; i++) {
+    const curr = candles[i];
+    const prev = candles[i - 1];
+
+    const tr1 = curr.h - curr.l;                    // High - Low
+    const tr2 = Math.abs(curr.h - prev.c);          // |High - Previous Close|
+    const tr3 = Math.abs(curr.l - prev.c);          // |Low - Previous Close|
+
+    trueRanges.push(Math.max(tr1, tr2, tr3));
+  }
+
+  // Calcular promedio de los últimos 'period' true ranges
+  const recentTRs = trueRanges.slice(-period);
+  const atr = recentTRs.reduce((sum, tr) => sum + tr, 0) / recentTRs.length;
+
+  return atr;
+}
+
+/**
+ * Actualiza todos los indicadores técnicos
+ */
+function updateIndicators() {
+  const analysisCandles = getAnalysisCandles();
+
+  if (analysisCandles.length < EMA_SLOW_PERIOD) {
+    emaFast = null;
+    emaSlow = null;
+    atrValue = null;
+    currentTrend = 'neutral';
+    volatilityLevel = 'normal';
+    return;
+  }
+
+  // Calcular EMAs
+  emaFast = calculateEMA(analysisCandles, EMA_FAST_PERIOD);
+  emaSlow = calculateEMA(analysisCandles, EMA_SLOW_PERIOD);
+
+  // Calcular ATR
+  atrValue = calculateATR(analysisCandles);
+
+  // Calcular ATR promedio (para comparar volatilidad)
+  if (analysisCandles.length >= ATR_PERIOD * 2) {
+    const pastCandles = analysisCandles.slice(0, -ATR_PERIOD);
+    atrAverage = calculateATR(pastCandles);
+  }
+
+  // Determinar tendencia basada en EMAs
+  if (emaFast !== null && emaSlow !== null) {
+    const emaDiff = (emaFast - emaSlow) / emaSlow * 100;
+    if (emaDiff > 0.02) {
+      currentTrend = 'bullish';
+    } else if (emaDiff < -0.02) {
+      currentTrend = 'bearish';
+    } else {
+      currentTrend = 'neutral';
+    }
+  }
+
+  // Determinar nivel de volatilidad
+  if (atrValue !== null && atrAverage !== null && atrAverage > 0) {
+    const volRatio = atrValue / atrAverage;
+    if (volRatio < 0.7) {
+      volatilityLevel = 'low';
+    } else if (volRatio > 1.5) {
+      volatilityLevel = 'high';
+    } else {
+      volatilityLevel = 'normal';
+    }
+  }
+}
+
+/**
+ * Verifica y actualiza el estado de warmup del sistema
+ */
+function checkWarmupStatus() {
+  const analysisCandles = getAnalysisCandles();
+  const candleCount = analysisCandles.length;
+
+  // Calcular nivel de warmup (0-100%)
+  systemWarmupLevel = Math.min(100, Math.round((candleCount / TARGET_CANDLES_FULL) * 100));
+
+  // Sistema está listo cuando tiene suficientes velas para EMA 21
+  const wasWarmedUp = isSystemWarmedUp;
+  isSystemWarmedUp = candleCount >= TARGET_CANDLES_FULL;
+
+  // Log cuando se complete el warmup
+  if (isSystemWarmedUp && !wasWarmedUp) {
+    logMonitor(`✅ Sistema 100% listo (${candleCount} velas)`, 'success');
+  }
+
+  // Actualizar indicadores si hay suficientes datos
+  if (candleCount >= EMA_FAST_PERIOD) {
+    updateIndicators();
+  }
+
+  return isSystemWarmedUp;
+}
+
+/**
+ * Calcula el score de una señal (0-10)
+ * @param {string} signalType - 'call' o 'put'
+ * @param {string} strategy - Nombre de la estrategia que generó la señal
+ * @returns {number} - Score de 0 a 10
+ */
+function calculateSignalScore(signalType, strategy) {
+  let score = 0;
+
+  // Base: Todas las señales empiezan con 3 puntos
+  score += 3;
+
+  // +2 puntos: Señal alineada con tendencia EMA
+  if (currentTrend === 'bullish' && signalType === 'call') score += 2;
+  if (currentTrend === 'bearish' && signalType === 'put') score += 2;
+
+  // +1 punto: Tendencia neutral (mercado en rango, bueno para reversiones)
+  if (currentTrend === 'neutral') score += 1;
+
+  // +2 puntos: Volatilidad normal (ni muy baja ni muy alta)
+  if (volatilityLevel === 'normal') score += 2;
+  // +1 punto: Volatilidad baja (menos ruido)
+  if (volatilityLevel === 'low') score += 1;
+  // -1 punto: Volatilidad alta (más riesgo)
+  if (volatilityLevel === 'high') score -= 1;
+
+  // +2 puntos: Estrategias de alta probabilidad
+  if (strategy.includes('Rechazo')) score += 2;
+  if (strategy.includes('Engulfing')) score += 1;
+  if (strategy.includes('PinBar')) score += 1;
+
+  // +1 punto: Estrategias de ruptura confirmada
+  if (strategy.includes('Breakout')) score += 1;
+
+  // Verificar confluencia con niveles S/R
+  const analysisCandles = getAnalysisCandles();
+  if (analysisCandles.length >= 10) {
+    const currentPrice = analysisCandles[analysisCandles.length - 1].c;
+    const { supports, resistances } = getLevels(analysisCandles, analysisCandles.length - 1);
+
+    // +1 punto por confluencia con nivel cercano
+    if (signalType === 'call' && isNearLevel(currentPrice, supports, 0.0003)) score += 1;
+    if (signalType === 'put' && isNearLevel(currentPrice, resistances, 0.0003)) score += 1;
+  }
+
+  // Asegurar que el score esté entre 0 y 10
+  return Math.max(0, Math.min(10, score));
+}
+
+/**
+ * Evalúa si se debe ejecutar martingala basado en análisis previo
+ * @param {string} tradeType - 'call' o 'put'
+ * @returns {boolean} - true si se debe ejecutar martingala
+ */
+function shouldExecuteMartingale(tradeType) {
+  // Si el sistema no está listo, no ejecutar martingala
+  if (!isSystemWarmedUp) {
+    logMonitor('⏳ Martingala pausada - Sistema en warmup', 'info');
+    return false;
+  }
+
+  // Verificar que la tendencia no esté fuertemente en contra
+  if (currentTrend === 'bullish' && tradeType === 'put') {
+    logMonitor('⚠️ Martingala cancelada - Tendencia alcista contra PUT', 'pattern');
+    return false;
+  }
+  if (currentTrend === 'bearish' && tradeType === 'call') {
+    logMonitor('⚠️ Martingala cancelada - Tendencia bajista contra CALL', 'pattern');
+    return false;
+  }
+
+  // Verificar volatilidad
+  if (volatilityLevel === 'high') {
+    logMonitor('⚠️ Martingala pausada - Alta volatilidad', 'pattern');
+    return false;
+  }
+
+  // Calcular score mínimo para martingala
+  const score = calculateSignalScore(tradeType, 'Martingala');
+  if (score < MIN_SCORE_MARTINGALE) {
+    logMonitor(`⚠️ Martingala cancelada - Score ${score}/${MIN_SCORE_MARTINGALE}`, 'pattern');
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Obtiene el precio actual del mercado
+ * @returns {number|null} - Precio actual o null
+ */
+function getCurrentPrice() {
+  // Primero intentar del WebSocket
+  if (lastWsData && lastWsData.closePrice) {
+    return lastWsData.closePrice;
+  }
+
+  // Luego de la vela actual
+  if (currentCandle && currentCandle.c) {
+    return currentCandle.c;
+  }
+
+  // Finalmente de las velas del gráfico
+  const analysisCandles = getAnalysisCandles();
+  if (analysisCandles.length > 0) {
+    return analysisCandles[analysisCandles.length - 1].c;
+  }
+
+  return null;
+}
+
+// ============= DETECCIÓN DE SEÑALES (MEJORADA V12) =============
 function detectSignal(liveCandle) {
+  // V12: Verificar estado de warmup
+  checkWarmupStatus();
+
+  // V12: No operar si el sistema no está 100% listo
+  if (!isSystemWarmedUp) {
+    // Actualizar UI con estado de warmup (no bloquear análisis)
+    return null;
+  }
+
   // MEJORADO: Usar velas del gráfico si están disponibles
   const baseCandles = getAnalysisCandles();
   const analysisCandles = [...baseCandles];
-  
+
   // Solo añadir la vela live si estamos analizando en tiempo real
   if (liveCandle && !config.operateOnNext) {
     analysisCandles.push(liveCandle);
   }
-  
+
   if (analysisCandles.length < 3) return null;
-  
+
   const i = analysisCandles.length - 1;
   const now = analysisCandles[i];
   const prev = analysisCandles[i - 1];
   const prev2 = analysisCandles[i - 2];
-  
+
   // MEJORADO: Validar que las velas de análisis estén cerradas (excepto la actual)
   const currentTime = Date.now();
   if (!isCandleClosed(prev, currentTime) || !isCandleClosed(prev2, currentTime)) {
     // Las velas previas no están cerradas, esperar
     return null;
   }
-  
+
   const { supports, resistances } = getLevels(analysisCandles, i);
   const nearSupport = isNearLevel(now.l, supports);
   const nearResistance = isNearLevel(now.h, resistances);
-  
+
   let signal = null;
   let strategy = '';
   
@@ -766,16 +1189,28 @@ function detectSignal(liveCandle) {
   }
   
   if (signal) {
+    // V12: Calcular score de la señal
+    const score = calculateSignalScore(signal, strategy);
+
+    // V12: Filtrar por score mínimo
+    if (score < MIN_SCORE_TO_TRADE) {
+      logMonitor(`⚠️ Señal ${signal.toUpperCase()} rechazada - Score ${score}/${MIN_SCORE_TO_TRADE}`, 'info');
+      return null;
+    }
+
     let displayType = signal;
     let note = '';
     if (config.invertTrade) {
       displayType = signal === 'call' ? 'put' : 'call';
       note = ' (INV)';
     }
-    // MEJORADO: Mostrar fuente de datos en el log
+
+    // MEJORADO: Mostrar fuente de datos y score en el log
     const sourceTag = chartAccessMethod !== 'websocket' ? ` [${chartAccessMethod}]` : '';
-    logMonitor(`🚀 ${strategy} → ${displayType.toUpperCase()}${note}${sourceTag}`, 'pattern');
-    return { d: signal };
+    const trendTag = currentTrend !== 'neutral' ? ` [${currentTrend.toUpperCase()}]` : '';
+    logMonitor(`🚀 ${strategy} → ${displayType.toUpperCase()}${note} | Score: ${score}/10${trendTag}${sourceTag}`, 'pattern');
+
+    return { d: signal, score: score, strategy: strategy };
   }
   return null;
 }
@@ -856,13 +1291,23 @@ function onTick(data) {
       l: data.closePrice, c: data.closePrice, v: data.volume
     };
     
-    // Martingala
+    // Martingala V12: Verificar condiciones antes de ejecutar
     if (activeMartingaleTrade && config.useMartingale) {
-      logMonitor(`Martingala Nivel ${mgLevel}`, 'info');
-      if (config.autoTrade) executeTrade(activeMartingaleTrade.type);
-      pendingTrades.push({ k: currentCandle.s, type: activeMartingaleTrade.type });
-      tradeExecutedThisCandle = true;
-      lastTradeType = activeMartingaleTrade.type;
+      if (shouldExecuteMartingale(activeMartingaleTrade.type)) {
+        logMonitor(`Martingala Nivel ${mgLevel}`, 'info');
+        if (config.autoTrade) executeTrade(activeMartingaleTrade.type);
+        // V12: Guardar precio de entrada real
+        const entryPrice = getCurrentPrice();
+        pendingTrades.push({ k: currentCandle.s, type: activeMartingaleTrade.type, entryPrice: entryPrice });
+        tradeExecutedThisCandle = true;
+        lastTradeType = activeMartingaleTrade.type;
+      } else {
+        // Martingala cancelada por condiciones desfavorables
+        mgLevel = 0;
+        stats.l++;
+        sessionStats.l++;
+        logMonitor('⛔ Martingala cancelada - Condiciones desfavorables', 'blocked');
+      }
       activeMartingaleTrade = null;
     }
   } else {
@@ -911,9 +1356,11 @@ function updateSignalUI(sec, key) {
         lastTradeType = type;
         const tKey = key + 60000;
         if (!pendingTrades.some(t => t.k === tKey)) {
-          pendingTrades.push({ k: tKey, type: type });
+          // V12: Guardar precio de entrada real para verificación precisa
+          const entryPrice = getCurrentPrice();
+          pendingTrades.push({ k: tKey, type: type, entryPrice: entryPrice });
           if (config.autoTrade) executeTrade(type);
-          else logMonitor(`Señal manual: ${type.toUpperCase()}`, 'success');
+          else logMonitor(`Señal manual: ${type.toUpperCase()} @ ${entryPrice}`, 'success');
         }
       }
     } else {
@@ -1078,23 +1525,30 @@ function executeTradeWithRetry(type, maxRetries) {
   setTimeout(attemptClick, 100);
 }
 
-// ============= VERIFICACIÓN DE RESULTADOS =============
+// ============= VERIFICACIÓN DE RESULTADOS (V12: PRECIO DE ENTRADA REAL) =============
 function checkTradeResults(candle) {
   const toRemove = [];
   pendingTrades.forEach((t, i) => {
     if (t.k === candle.s) {
-      const winCall = t.type === 'call' && candle.c > candle.o;
-      const winPut = t.type === 'put' && candle.c < candle.o;
+      // V12: Usar precio de entrada real en lugar del precio de apertura de la vela
+      const referencePrice = t.entryPrice || candle.o; // Fallback a candle.o para compatibilidad
+
+      const winCall = t.type === 'call' && candle.c > referencePrice;
+      const winPut = t.type === 'put' && candle.c < referencePrice;
       const isWin = winCall || winPut;
-      const isDraw = candle.c === candle.o;
-      
+      const isDraw = candle.c === referencePrice;
+
+      // V12: Log detallado del resultado
+      const priceChange = ((candle.c - referencePrice) / referencePrice * 100).toFixed(4);
+      const direction = candle.c > referencePrice ? '↑' : candle.c < referencePrice ? '↓' : '→';
+
       if (isWin) {
         stats.w++;
         sessionStats.w++;
         consecutiveLosses = 0;  // Resetear contador de pérdidas consecutivas
         mgLevel = 0;
         activeMartingaleTrade = null;
-        logMonitor('✅ GANADA', 'success');
+        logMonitor(`✅ GANADA ${direction}${priceChange}% (${referencePrice.toFixed(2)} → ${candle.c.toFixed(2)})`, 'success');
       } else if (!isDraw) {
         consecutiveLosses++;  // Incrementar contador de pérdidas consecutivas
         if (config.useMartingale) {
@@ -1105,37 +1559,37 @@ function checkTradeResults(candle) {
             sessionStats.l++;
             mgLevel = 0;
             activeMartingaleTrade = null;
-            logMonitor('⛔ Momentum en contra - Stop', 'blocked');
+            logMonitor(`⛔ Momentum en contra - Stop ${direction}${priceChange}%`, 'blocked');
           } else if (mgLevel < config.mgMaxSteps) {
             mgLevel++;
             activeMartingaleTrade = { type: t.type };
-            logMonitor(`❌ PERDIDA - Martingala ${mgLevel}/${config.mgMaxSteps}`, 'blocked');
+            logMonitor(`❌ PERDIDA ${direction}${priceChange}% - Martingala ${mgLevel}/${config.mgMaxSteps}`, 'blocked');
           } else {
             stats.l++;
             sessionStats.l++;
             mgLevel = 0;
             activeMartingaleTrade = null;
-            logMonitor('⛔ Max Martingala - Stop', 'blocked');
+            logMonitor(`⛔ Max Martingala - Stop ${direction}${priceChange}%`, 'blocked');
           }
         } else {
           stats.l++;
           sessionStats.l++;
-          logMonitor('❌ PERDIDA', 'blocked');
+          logMonitor(`❌ PERDIDA ${direction}${priceChange}% (${referencePrice.toFixed(2)} → ${candle.c.toFixed(2)})`, 'blocked');
         }
         // Advertir sobre pérdidas consecutivas
         if (consecutiveLosses >= 3) {
           logMonitor(`⚠️ ${consecutiveLosses} pérdidas consecutivas`, 'pattern');
         }
       } else {
-        logMonitor('↔️ EMPATE', 'info');
+        logMonitor(`↔️ EMPATE @ ${referencePrice.toFixed(2)}`, 'info');
       }
-      
+
       toRemove.push(i);
       updateStats();
       checkStopConditions();
     }
   });
-  
+
   toRemove.reverse().forEach(i => pendingTrades.splice(i, 1));
 }
 
@@ -1189,6 +1643,61 @@ function updateStats() {
   const wr = total > 0 ? ((stats.w / total) * 100).toFixed(0) : '--';
   if (DOM.uiWr) DOM.uiWr.textContent = `${wr}%`;
   if (DOM.uiMg) DOM.uiMg.textContent = mgLevel;
+}
+
+/**
+ * V12: Actualiza la UI del indicador de warmup
+ */
+function updateWarmupUI() {
+  if (!DOM.warmupSection) return;
+
+  // Actualizar porcentaje
+  if (DOM.warmupPct) {
+    DOM.warmupPct.textContent = `${systemWarmupLevel}%`;
+  }
+
+  // Actualizar barra de progreso
+  if (DOM.warmupBarFill) {
+    DOM.warmupBarFill.style.width = `${systemWarmupLevel}%`;
+  }
+
+  // Actualizar ícono y texto
+  if (isSystemWarmedUp) {
+    DOM.warmupSection.classList.add('ready');
+    if (DOM.warmupIcon) DOM.warmupIcon.textContent = '✓';
+    if (DOM.warmupText) DOM.warmupText.textContent = 'Sistema listo para operar';
+  } else {
+    DOM.warmupSection.classList.remove('ready');
+    if (DOM.warmupIcon) DOM.warmupIcon.textContent = '🔄';
+    if (DOM.warmupText) {
+      const analysisCandles = getAnalysisCandles();
+      DOM.warmupText.textContent = `Cargando velas (${analysisCandles.length}/${TARGET_CANDLES_FULL})...`;
+    }
+  }
+
+  // Actualizar indicadores técnicos
+  if (DOM.indEma) {
+    if (emaFast !== null && emaSlow !== null) {
+      const diff = ((emaFast - emaSlow) / emaSlow * 100).toFixed(3);
+      DOM.indEma.textContent = `EMA: ${diff > 0 ? '+' : ''}${diff}%`;
+    } else {
+      DOM.indEma.textContent = 'EMA: --';
+    }
+  }
+
+  if (DOM.indAtr) {
+    if (atrValue !== null) {
+      DOM.indAtr.textContent = `ATR: ${atrValue.toFixed(4)}`;
+      DOM.indAtr.className = `indicator-item ${volatilityLevel === 'high' ? 'bearish' : volatilityLevel === 'low' ? 'neutral' : ''}`;
+    } else {
+      DOM.indAtr.textContent = 'ATR: --';
+    }
+  }
+
+  if (DOM.indTrend) {
+    DOM.indTrend.textContent = `TREND: ${currentTrend.toUpperCase()}`;
+    DOM.indTrend.className = `indicator-item ${currentTrend}`;
+  }
 }
 
 function readAccount() {
@@ -1754,6 +2263,22 @@ function initSystem() {
 .btn-stop{background:linear-gradient(135deg,#e74c3c 0%,#c0392b 100%);color:#fff}
 .btn-stop:hover{background:linear-gradient(135deg,#c0392b 0%,#a93226 100%)}
 .source-badge{font-size:9px;padding:2px 6px;border-radius:4px;background:rgba(0,230,118,.2);color:#00e676;margin-left:auto}
+.warmup-section{margin:10px 0;padding:10px;background:rgba(0,0,0,.3);border-radius:10px;border:1px solid rgba(255,255,255,.05)}
+.warmup-section.ready{border-color:rgba(0,230,118,.3);background:rgba(0,230,118,.05)}
+.warmup-header{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.warmup-icon{font-size:14px}
+.warmup-text{flex:1;font-size:11px;color:#aaa}
+.warmup-section.ready .warmup-text{color:#00e676}
+.warmup-pct{font-size:12px;font-weight:700;color:#f1c40f}
+.warmup-section.ready .warmup-pct{color:#00e676}
+.warmup-bar-bg{height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden;margin-bottom:8px}
+.warmup-bar-fill{height:100%;background:linear-gradient(90deg,#f39c12 0%,#f1c40f 100%);transition:width .3s;border-radius:2px}
+.warmup-section.ready .warmup-bar-fill{background:linear-gradient(90deg,#00c853 0%,#00e676 100%)}
+.warmup-indicators{display:flex;gap:8px;flex-wrap:wrap}
+.indicator-item{font-size:9px;padding:2px 6px;background:rgba(255,255,255,.05);border-radius:4px;color:#888}
+.indicator-item.bullish{background:rgba(0,230,118,.15);color:#00e676}
+.indicator-item.bearish{background:rgba(231,76,60,.15);color:#e74c3c}
+.indicator-item.neutral{background:rgba(241,196,15,.15);color:#f1c40f}
 </style>
 
 <div class="hud-header" id="worbit-header">
@@ -1875,7 +2400,24 @@ function initSystem() {
     <div class="stat-box"><div class="stat-label">VELAS</div><div class="stat-val" id="ui-cnt">0/${TARGET_CANDLES}</div></div>
     <div class="stat-box" id="mg-box" style="display:none"><div class="stat-label">NIVEL MG</div><div class="stat-val" id="ui-mg" style="color:#f1c40f">0</div></div>
   </div>
-  
+
+  <!-- V12: Indicador de Warmup del Sistema -->
+  <div class="warmup-section" id="warmup-section">
+    <div class="warmup-header">
+      <span class="warmup-icon" id="warmup-icon">🔄</span>
+      <span class="warmup-text" id="warmup-text">Sistema cargando...</span>
+      <span class="warmup-pct" id="warmup-pct">0%</span>
+    </div>
+    <div class="warmup-bar-bg">
+      <div class="warmup-bar-fill" id="warmup-bar-fill" style="width:0%"></div>
+    </div>
+    <div class="warmup-indicators" id="warmup-indicators">
+      <span class="indicator-item" id="ind-ema">EMA: --</span>
+      <span class="indicator-item" id="ind-atr">ATR: --</span>
+      <span class="indicator-item" id="ind-trend">TREND: --</span>
+    </div>
+  </div>
+
   <div id="signal-box"><div style="font-size:11px;color:#666">INICIAR PARA ANALIZAR</div></div>
   
   <div class="monitor-container">
@@ -1942,7 +2484,16 @@ function initSystem() {
       profitTarget: $('profit-target'),
       stopLoss: $('stop-loss'),
       maxWins: $('max-wins'),
-      maxLosses: $('max-losses')
+      maxLosses: $('max-losses'),
+      // V12: Elementos de warmup
+      warmupSection: $('warmup-section'),
+      warmupIcon: $('warmup-icon'),
+      warmupText: $('warmup-text'),
+      warmupPct: $('warmup-pct'),
+      warmupBarFill: $('warmup-bar-fill'),
+      indEma: $('ind-ema'),
+      indAtr: $('ind-atr'),
+      indTrend: $('ind-trend')
     };
     
     // Event Listeners
