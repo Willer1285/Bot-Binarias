@@ -617,7 +617,7 @@ function applyConfigToUI() {
   }
 }
 
-// ============= FUNCIONES DE PRICE ACTION =============
+// ============= FUNCIONES DE PRICE ACTION Y ANÁLISIS =============
 const getBody = c => Math.abs(c.c - c.o);
 const getUpperWick = c => c.h - Math.max(c.o, c.c);
 const getLowerWick = c => Math.min(c.o, c.c) - c.l;
@@ -627,6 +627,34 @@ const getAvgBody = (arr, count = 10) => {
   if (arr.length < count) return 0;
   return arr.slice(-count).reduce((a, c) => a + getBody(c), 0) / count;
 };
+
+// Cálculo de SMA (Simple Moving Average)
+function calculateSMA(data, period) {
+  if (data.length < period) return null;
+  const slice = data.slice(-period);
+  const sum = slice.reduce((acc, c) => acc + c.c, 0);
+  return sum / period;
+}
+
+// Cálculo de RSI (Relative Strength Index)
+function calculateRSI(data, period = 14) {
+  if (data.length < period + 1) return 50;
+  
+  let gains = 0, losses = 0;
+  
+  for (let i = data.length - period; i < data.length; i++) {
+    const diff = data[i].c - data[i-1].c;
+    if (diff >= 0) gains += diff;
+    else losses += Math.abs(diff);
+  }
+  
+  const avgGain = gains / period;
+  const avgLoss = losses / period;
+  
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - (100 / (1 + rs));
+}
 
 function getLevels(arr, index) {
   const supports = [], resistances = [];
@@ -653,8 +681,19 @@ function isPinBar(c, type) {
   const body = getBody(c);
   const upper = getUpperWick(c);
   const lower = getLowerWick(c);
-  if (type === 'bullish') return lower > (body * 2) && upper < body;
-  if (type === 'bearish') return upper > (body * 2) && lower < body;
+  const total = c.h - c.l;
+  
+  // Pinbar más estricto
+  if (total === 0) return false;
+  
+  if (type === 'bullish') {
+    // Mecha inferior larga, cuerpo pequeño en la parte superior
+    return lower >= (total * 0.6) && upper <= (total * 0.15); 
+  }
+  if (type === 'bearish') {
+    // Mecha superior larga, cuerpo pequeño en la parte inferior
+    return upper >= (total * 0.6) && lower <= (total * 0.15);
+  }
   return false;
 }
 
@@ -687,6 +726,51 @@ function isStrongMomentum(arr, type) {
     return isGreen(last) && isGreen(prev) && isGreen(prev2) && getBody(last) > avgBody;
   }
   return false;
+}
+
+// ============= SISTEMA DE PUNTAJE (SCORING SYSTEM) =============
+function calculateScore(signalType, candles, levels, indicators) {
+  let score = 50; // Puntuación base
+  const last = candles[candles.length - 1];
+  const prev = candles[candles.length - 2];
+  const sma20 = indicators.sma20;
+  const rsi = indicators.rsi;
+  
+  // 1. A favor de la tendencia (SMA 20)
+  if (sma20) {
+    if (signalType === 'call' && last.c > sma20) score += 15;
+    else if (signalType === 'put' && last.c < sma20) score += 15;
+    else score -= 10; // Operar contra tendencia reduce puntaje
+  }
+  
+  // 2. Niveles de Soporte/Resistencia
+  const isSupport = isNearLevel(last.l, levels.supports);
+  const isResistance = isNearLevel(last.h, levels.resistances);
+  
+  if (signalType === 'call' && isSupport) score += 20;
+  if (signalType === 'put' && isResistance) score += 20;
+  
+  // 3. RSI (Sobreventa/Sobrecompra)
+  if (rsi) {
+    if (signalType === 'call' && rsi < 30) score += 10; // Rebote en sobreventa
+    if (signalType === 'put' && rsi > 70) score += 10; // Rebote en sobrecompra
+    
+    // Momentum RSI (cruces)
+    if (signalType === 'call' && rsi > 50 && rsi < 70) score += 5;
+    if (signalType === 'put' && rsi < 50 && rsi > 30) score += 5;
+  }
+  
+  // 4. Calidad del Patrón (Velas)
+  const body = getBody(last);
+  const avgBody = getAvgBody(candles);
+  
+  if (body > avgBody) score += 5; // Vela con decisión
+  if (body > avgBody * 1.5) score += 5; // Vela fuerte
+  
+  // Penalización por velas muy pequeñas (doji sin decisión)
+  if (body < avgBody * 0.2) score -= 10;
+  
+  return Math.min(100, Math.max(0, score));
 }
 
 // ============= DETECCIÓN DE SEÑALES (MEJORADA) =============
@@ -765,17 +849,48 @@ function detectSignal(liveCandle) {
     }
   }
   
+  // S5: Continuidad de Tendencia (Momentum)
+  if (!signal) {
+     const sma20 = calculateSMA(baseCandles, 20);
+     if (sma20) {
+        if (now.c > sma20 && isGreen(now) && isGreen(prev) && getBody(now) > getAvgBody(baseCandles)) {
+           signal = 'call'; strategy = 'Continuidad Alcista';
+        } else if (now.c < sma20 && isRed(now) && isRed(prev) && getBody(now) > getAvgBody(baseCandles)) {
+           signal = 'put'; strategy = 'Continuidad Bajista';
+        }
+     }
+  }
+  
   if (signal) {
+    // CALCULAR PUNTAJE (SCORE)
+    const indicators = {
+      sma20: calculateSMA(analysisCandles, 20),
+      rsi: calculateRSI(analysisCandles, 14)
+    };
+    
+    const score = calculateScore(signal, analysisCandles, { supports, resistances }, indicators);
+    const minScore = 75; // Umbral mínimo de confianza
+    
     let displayType = signal;
     let note = '';
     if (config.invertTrade) {
       displayType = signal === 'call' ? 'put' : 'call';
       note = ' (INV)';
     }
+    
     // MEJORADO: Mostrar fuente de datos en el log
     const sourceTag = chartAccessMethod !== 'websocket' ? ` [${chartAccessMethod}]` : '';
-    logMonitor(`🚀 ${strategy} → ${displayType.toUpperCase()}${note}${sourceTag}`, 'pattern');
-    return { d: signal };
+    
+    if (score >= minScore) {
+      logMonitor(`🚀 ${strategy} (${score}%) → ${displayType.toUpperCase()}${note}${sourceTag}`, 'pattern');
+      return { d: signal, score: score };
+    } else {
+      // Solo loguear si el score no es terrible (para debug)
+      if (score > 50) {
+        logMonitor(`⚠ Señal ignorada: ${strategy} (Score: ${score}%)`, 'info');
+      }
+      return null;
+    }
   }
   return null;
 }
