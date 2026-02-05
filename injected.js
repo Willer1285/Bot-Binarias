@@ -1,5 +1,5 @@
-// injected.js - WORBIT SNIPER V11.0 - LECTURA DIRECTA DEL GRÃFICO
-// CaracterÃ­sticas: Lectura de velas del grÃ¡fico, TradingView integration, MÃºltiples fuentes de datos
+// injected.js - WORBIT SNIPER V11.0 - LECTURA DIRECTA DEL GRÁFICO
+// Características: Lectura de velas del gráfico, TradingView integration, Múltiples fuentes de datos
 (function() {
 'use strict';
 console.log('%c WORBIT SNIPER V11.0 LOADING...', 'background: #00e676; color: #000; font-size: 14px; padding: 5px;');
@@ -12,7 +12,7 @@ const MAX_LOGS = 20;
 const HEALTH_CHECK_INTERVAL = 3000;
 const DATA_TIMEOUT = 8000;
 const RECONNECT_DELAY = 5000;
-const CHART_SYNC_INTERVAL = 1000; // Sincronizar con grÃ¡fico cada segundo
+const CHART_SYNC_INTERVAL = 1000; // Sincronizar con gráfico cada segundo
 
 // ============= ESTADO GLOBAL =============
 let DOM = {};
@@ -20,7 +20,7 @@ let isSystemReady = false;
 let isVisible = false;
 let isRunning = false;
 
-// ConfiguraciÃ³n (se carga desde storage)
+// Configuración (se carga desde storage)
 let config = {
   autoTrade: false,
   useMartingale: false,
@@ -32,7 +32,7 @@ let config = {
   mgFactor: 2.0,
   entrySec: 59,
   timeOffset: 0,
-  useChartData: true, // NUEVO: Usar datos del grÃ¡fico cuando estÃ©n disponibles
+  useChartData: true, // NUEVO: Usar datos del gráfico cuando estén disponibles
   stopConfig: {
     useTime: false,
     timeMin: 0,
@@ -51,7 +51,7 @@ let isDemo = true;
 let currentAmt = 0;
 let mgLevel = 0;
 let candles = [];
-let chartCandles = []; // NUEVO: Velas obtenidas directamente del grÃ¡fico
+let chartCandles = []; // NUEVO: Velas obtenidas directamente del gráfico
 let currentCandle = null;
 let currentPair = '';
 let pendingTrades = [];
@@ -68,7 +68,7 @@ let lastTickTime = 0;
 let wsConnected = false;
 let lastWsData = null;
 
-// NUEVO: Estado del acceso al grÃ¡fico
+// NUEVO: Estado del acceso al gráfico
 let chartAccessMethod = 'none'; // 'tradingview', 'zustand', 'api', 'websocket'
 let tvWidgetRef = null;
 let chartSyncInterval = null;
@@ -79,20 +79,20 @@ let tickerInterval = null;
 let sessionInterval = null;
 let healthCheckInterval = null;
 
-// ============= NUEVO: ACCESO AL GRÃFICO =============
+// ============= NUEVO: ACCESO AL GRÁFICO =============
 
 /**
  * Intenta obtener referencia al widget de TradingView
- * El widget estÃ¡ disponible en window.tvWidget cuando el grÃ¡fico estÃ¡ cargado
+ * El widget está disponible en window.tvWidget cuando el gráfico está cargado
  */
 function getTradingViewWidget() {
   try {
-    // MÃ©todo 1: Acceso directo al widget global
+    // Método 1: Acceso directo al widget global
     if (window.tvWidget && typeof window.tvWidget.activeChart === 'function') {
       return window.tvWidget;
     }
     
-    // MÃ©todo 2: Buscar en el iframe del grÃ¡fico
+    // Método 2: Buscar en el iframe del gráfico
     const chartContainer = document.querySelector('#chartContainer');
     if (chartContainer) {
       const iframe = chartContainer.querySelector('iframe');
@@ -102,12 +102,12 @@ function getTradingViewWidget() {
             return iframe.contentWindow.tvWidget;
           }
         } catch (e) {
-          // RestricciÃ³n cross-origin, intentar otro mÃ©todo
+          // Restricción cross-origin, intentar otro método
         }
       }
     }
     
-    // MÃ©todo 3: Buscar TVWidget en cualquier iframe
+    // Método 3: Buscar TVWidget en cualquier iframe
     const iframes = document.querySelectorAll('iframe');
     for (const iframe of iframes) {
       try {
@@ -125,7 +125,7 @@ function getTradingViewWidget() {
 }
 
 /**
- * Obtiene las velas del grÃ¡fico de TradingView
+ * Obtiene las velas del gráfico de TradingView
  * Retorna un array de velas en formato {s, o, h, l, c, v}
  */
 function getCandlesFromTradingView() {
@@ -136,10 +136,10 @@ function getCandlesFromTradingView() {
     const chart = widget.activeChart();
     if (!chart) return null;
     
-    // Intentar obtener datos del grÃ¡fico
-    // TradingView expone los datos a travÃ©s de diferentes mÃ©todos
+    // Intentar obtener datos del gráfico
+    // TradingView expone los datos a través de diferentes métodos
     
-    // MÃ©todo 1: exportData (si estÃ¡ disponible)
+    // Método 1: exportData (si está disponible)
     if (typeof chart.exportData === 'function') {
       return new Promise((resolve) => {
         chart.exportData({
@@ -163,7 +163,7 @@ function getCandlesFromTradingView() {
       });
     }
     
-    // MÃ©todo 2: Obtener series visibles
+    // Método 2: Obtener series visibles
     if (typeof chart.getAllStudies === 'function') {
       // Las series principales contienen los datos OHLC
       const series = chart.getAllStudies();
@@ -186,7 +186,7 @@ function getCandlesFromZustand() {
     const chartStore = localStorage.getItem('chart-storage');
     if (chartStore) {
       const parsed = JSON.parse(chartStore);
-      // El store puede tener datos de velas en cachÃ©
+      // El store puede tener datos de velas en caché
       if (parsed.state && parsed.state.candles) {
         return parsed.state.candles;
       }
@@ -198,7 +198,7 @@ function getCandlesFromZustand() {
 }
 
 /**
- * Sincroniza las velas del bot con las del grÃ¡fico
+ * Sincroniza las velas del bot con las del gráfico
  * Prioriza fuentes: TradingView > Zustand > API > WebSocket
  */
 async function syncWithChart() {
@@ -233,7 +233,7 @@ async function syncWithChart() {
     method = 'websocket';
   }
   
-  // Actualizar mÃ©todo de acceso si cambiÃ³
+  // Actualizar método de acceso si cambió
   if (method !== chartAccessMethod) {
     chartAccessMethod = method;
     if (method !== 'websocket' && method !== 'none') {
@@ -241,23 +241,23 @@ async function syncWithChart() {
     }
   }
   
-  // Si obtuvimos velas del grÃ¡fico, actualizar chartCandles
+  // Si obtuvimos velas del gráfico, actualizar chartCandles
   if (newCandles && newCandles.length > 0) {
     chartCandles = newCandles.slice(-MAX_CANDLES);
   }
 }
 
 /**
- * Obtiene las velas mÃ¡s confiables para anÃ¡lisis
- * Compara velas del grÃ¡fico con las construidas desde WebSocket
+ * Obtiene las velas más confiables para análisis
+ * Compara velas del gráfico con las construidas desde WebSocket
  */
 function getAnalysisCandles() {
-  // Si tenemos velas del grÃ¡fico y estÃ¡n actualizadas, usarlas
+  // Si tenemos velas del gráfico y están actualizadas, usarlas
   if (config.useChartData && chartCandles.length > 0) {
     const chartLastTime = chartCandles[chartCandles.length - 1]?.s || 0;
     const wsLastTime = candles[candles.length - 1]?.s || 0;
     
-    // Si las velas del grÃ¡fico son recientes (menos de 2 minutos de diferencia), usarlas
+    // Si las velas del gráfico son recientes (menos de 2 minutos de diferencia), usarlas
     if (Math.abs(chartLastTime - wsLastTime) < 120000) {
       return chartCandles;
     }
@@ -268,7 +268,7 @@ function getAnalysisCandles() {
 }
 
 /**
- * Valida que una vela estÃ© completamente cerrada
+ * Valida que una vela esté completamente cerrada
  */
 function isCandleClosed(candle, currentTime) {
   if (!candle || !candle.s) return false;
@@ -280,7 +280,7 @@ function isCandleClosed(candle, currentTime) {
 function getWorbitCredentials() {
   let credentials = null;
   
-  // MÃ©todo 1: Buscar en localStorage (setting-store de Zustand)
+  // Método 1: Buscar en localStorage (setting-store de Zustand)
   try {
     const settingStore = localStorage.getItem('setting-store');
     if (settingStore) {
@@ -295,7 +295,7 @@ function getWorbitCredentials() {
     }
   } catch (e) {}
   
-  // MÃ©todo 2: Buscar en el iframe del grÃ¡fico (parÃ¡metros de URL)
+  // Método 2: Buscar en el iframe del gráfico (parámetros de URL)
   if (!credentials || !credentials.otcApiUrl) {
     try {
       const chartFrame = document.querySelector('iframe[src*="chart"]') || 
@@ -317,7 +317,7 @@ function getWorbitCredentials() {
     } catch (e) {}
   }
   
-  // MÃ©todo 3: Buscar iframes y extraer de su contenido
+  // Método 3: Buscar iframes y extraer de su contenido
   if (!credentials || !credentials.otcApiUrl) {
     try {
       const iframes = document.querySelectorAll('iframe');
@@ -341,7 +341,7 @@ function getWorbitCredentials() {
     } catch (e) {}
   }
   
-  // MÃ©todo 4: Buscar en window.__NUXT__ o variables globales comunes
+  // Método 4: Buscar en window.__NUXT__ o variables globales comunes
   if (!credentials || !credentials.otcApiUrl) {
     try {
       if (window.__CONFIG__ && window.__CONFIG__.otcApiUrl) {
@@ -467,7 +467,7 @@ function scheduleReconnect() {
     wsReconnectTimeout = null;
     if (wsConnected) return;
     
-    logMonitor('Intentando reconexiÃ³n...', 'info');
+    logMonitor('Intentando reconexión...', 'info');
     const chartFrame = document.querySelector('iframe[src*="chart"]');
     if (chartFrame) {
       try {
@@ -484,12 +484,12 @@ function updateConnectionUI(connected) {
   }
 }
 
-// ============= CARGA DE DATOS HISTÃ“RICOS =============
+// ============= CARGA DE DATOS HISTÓRICOS =============
 async function loadHistoricalData(pair) {
   const credentials = getWorbitCredentials();
   
   if (!credentials?.otcApiUrl || !credentials?.otcApiKey) {
-    logMonitor('Sin API histÃ³rica - modo live', 'info');
+    logMonitor('Sin API histórica - modo live', 'info');
     return [];
   }
   
@@ -499,7 +499,7 @@ async function loadHistoricalData(pair) {
   const ticker = pair || symbol?.ticker;
   
   if (!ticker) {
-    logMonitor('Sin sÃ­mbolo para histÃ³rico', 'info');
+    logMonitor('Sin símbolo para histórico', 'info');
     return [];
   }
   
@@ -507,7 +507,7 @@ async function loadHistoricalData(pair) {
   const startTimeMs = endTime - (2 * 60 * 60 * 1000);
   
   try {
-    logMonitor('Cargando histÃ³rico...', 'info');
+    logMonitor('Cargando histórico...', 'info');
     
     const url = `${credentials.otcApiUrl}/aggregated-prices/prices`;
     const params = new URLSearchParams({
@@ -539,12 +539,12 @@ async function loadHistoricalData(pair) {
     }
     return [];
   } catch (e) {
-    logMonitor(`HistÃ³rico no disponible`, 'info');
+    logMonitor(`Histórico no disponible`, 'info');
     return [];
   }
 }
 
-// ============= PERSISTENCIA DE CONFIGURACIÃ“N =============
+// ============= PERSISTENCIA DE CONFIGURACIÓN =============
 function saveConfigToStorage() {
   const configToSave = {
     autoTrade: config.autoTrade,
@@ -574,7 +574,7 @@ window.addEventListener('message', (event) => {
     const c = event.data.config;
     config = { ...config, ...c };
     applyConfigToUI();
-    logMonitor('ConfiguraciÃ³n restaurada', 'info');
+    logMonitor('Configuración restaurada', 'info');
   }
 });
 
@@ -683,13 +683,13 @@ function isStrongMomentum(arr, type) {
   return false;
 }
 
-// ============= DETECCIÃ“N DE SEÃ‘ALES (MEJORADA) =============
+// ============= DETECCIÓN DE SEÑALES (MEJORADA) =============
 function detectSignal(liveCandle) {
-  // MEJORADO: Usar velas del grÃ¡fico si estÃ¡n disponibles
+  // MEJORADO: Usar velas del gráfico si están disponibles
   const baseCandles = getAnalysisCandles();
   const analysisCandles = [...baseCandles];
   
-  // Solo aÃ±adir la vela live si estamos analizando en tiempo real
+  // Solo añadir la vela live si estamos analizando en tiempo real
   if (liveCandle && !config.operateOnNext) {
     analysisCandles.push(liveCandle);
   }
@@ -701,10 +701,10 @@ function detectSignal(liveCandle) {
   const prev = analysisCandles[i - 1];
   const prev2 = analysisCandles[i - 2];
   
-  // MEJORADO: Validar que las velas de anÃ¡lisis estÃ©n cerradas (excepto la actual)
+  // MEJORADO: Validar que las velas de análisis estén cerradas (excepto la actual)
   const currentTime = Date.now();
   if (!isCandleClosed(prev, currentTime) || !isCandleClosed(prev2, currentTime)) {
-    // Las velas previas no estÃ¡n cerradas, esperar
+    // Las velas previas no están cerradas, esperar
     return null;
   }
   
@@ -768,7 +768,7 @@ function detectSignal(liveCandle) {
     }
     // MEJORADO: Mostrar fuente de datos en el log
     const sourceTag = chartAccessMethod !== 'websocket' ? ` [${chartAccessMethod}]` : '';
-    logMonitor(`ðŸš€ ${strategy} â†’ ${displayType.toUpperCase()}${note}${sourceTag}`, 'pattern');
+    logMonitor(`🚀 ${strategy} → ${displayType.toUpperCase()}${note}${sourceTag}`, 'pattern');
     return { d: signal };
   }
   return null;
@@ -780,7 +780,7 @@ function onTick(data) {
   
   updateConnectionUI(true);
   
-  // MEJORADO: Intentar sincronizar con el grÃ¡fico periÃ³dicamente
+  // MEJORADO: Intentar sincronizar con el gráfico periódicamente
   syncWithChart();
   
   if (DOM.uiPrice) {
@@ -807,11 +807,11 @@ function onTick(data) {
     if (DOM.uiCnt) DOM.uiCnt.textContent = `0/${TARGET_CANDLES}`;
     logMonitor(`Activo: ${currentPair}`, 'info');
     
-    // Cargar histÃ³rico para el nuevo activo
+    // Cargar histórico para el nuevo activo
     loadHistoricalData(currentPair).then(hist => {
       if (hist.length > 0) {
         candles = hist;
-        chartCandles = hist.slice(); // Copiar tambiÃ©n a chartCandles
+        chartCandles = hist.slice(); // Copiar también a chartCandles
         processed = hist.length;
         if (DOM.uiCnt) DOM.uiCnt.textContent = `${Math.min(processed, TARGET_CANDLES)}/${TARGET_CANDLES}`;
       }
@@ -876,14 +876,14 @@ function onTick(data) {
   updateSignalUI(sec, currentCandle.s);
 }
 
-// ============= UI DE SEÃ‘ALES =============
+// ============= UI DE SEÑALES =============
 function updateSignalUI(sec, key) {
   if (!DOM.signalBox) return;
   
   if (tradeExecutedThisCandle) {
     DOM.signalBox.className = lastTradeType === 'call' ? 'sig-possible-call' : 'sig-possible-put';
     DOM.signalBox.innerHTML = `
-      <div style="font-size:14px;font-weight:700">${lastTradeType === 'call' ? 'â–² COMPRA' : 'â–¼ VENTA'}</div>
+      <div style="font-size:14px;font-weight:700">${lastTradeType === 'call' ? '▲ COMPRA' : '▼ VENTA'}</div>
       <div style="font-size:10px;margin-top:4px">ESPERANDO RESULTADO...</div>`;
     return;
   }
@@ -896,8 +896,8 @@ function updateSignalUI(sec, key) {
     if (sec <= triggerSec && sec > (triggerSec - 5)) {
       DOM.signalBox.className = type === 'call' ? 'sig-entry-call' : 'sig-entry-put';
       DOM.signalBox.innerHTML = `
-        <div style="font-size:16px;font-weight:800">${type === 'call' ? 'â–² COMPRA' : 'â–¼ VENTA'}</div>
-        <div class="entry-countdown">Â¡ENTRAR AHORA!</div>`;
+        <div style="font-size:16px;font-weight:800">${type === 'call' ? '▲ COMPRA' : '▼ VENTA'}</div>
+        <div class="entry-countdown">¡ENTRAR AHORA!</div>`;
       
       if (!tradeExecutedThisCandle) {
         tradeExecutedThisCandle = true;
@@ -906,13 +906,13 @@ function updateSignalUI(sec, key) {
         if (!pendingTrades.some(t => t.k === tKey)) {
           pendingTrades.push({ k: tKey, type: type });
           if (config.autoTrade) executeTrade(type);
-          else logMonitor(`SeÃ±al manual: ${type.toUpperCase()}`, 'success');
+          else logMonitor(`Señal manual: ${type.toUpperCase()}`, 'success');
         }
       }
     } else {
       DOM.signalBox.className = 'sig-anticipation';
       DOM.signalBox.innerHTML = `
-        <div class="anticipation-badge">PREPARAR ${type === 'call' ? 'â–²' : 'â–¼'}</div>
+        <div class="anticipation-badge">PREPARAR ${type === 'call' ? '▲' : '▼'}</div>
         <div style="font-size:11px;margin-top:6px">Entrada en ${sec}s</div>`;
     }
   } else {
@@ -921,7 +921,7 @@ function updateSignalUI(sec, key) {
   }
 }
 
-// ============= EJECUCIÃ“N DE TRADES =============
+// ============= EJECUCIÓN DE TRADES =============
 function calcAmount() {
   let base = (balance * config.riskPct) / 100;
   let multiplier = 1;
@@ -964,7 +964,7 @@ function executeTrade(type) {
         targetButton.click();
         logMonitor(`Click: ${type.toUpperCase()}`, 'success');
       } else {
-        logMonitor(`BotÃ³n ${type} no encontrado`, 'blocked');
+        logMonitor(`Botón ${type} no encontrado`, 'blocked');
       }
     } catch (e) {
       logMonitor('Error en click', 'blocked');
@@ -973,7 +973,7 @@ function executeTrade(type) {
   return true;
 }
 
-// ============= VERIFICACIÃ“N DE RESULTADOS =============
+// ============= VERIFICACIÓN DE RESULTADOS =============
 function checkTradeResults(candle) {
   const toRemove = [];
   pendingTrades.forEach((t, i) => {
@@ -988,7 +988,7 @@ function checkTradeResults(candle) {
         sessionStats.w++;
         mgLevel = 0;
         activeMartingaleTrade = null;
-        logMonitor('âœ… GANADA', 'success');
+        logMonitor('✅ GANADA', 'success');
       } else if (!isDraw) {
         if (config.useMartingale) {
           const stopLossTrigger = (t.type === 'call' && isStrongMomentum(candles, 'bearish')) ||
@@ -998,25 +998,25 @@ function checkTradeResults(candle) {
             sessionStats.l++;
             mgLevel = 0;
             activeMartingaleTrade = null;
-            logMonitor('â›” Momentum en contra - Stop', 'blocked');
+            logMonitor('⛔ Momentum en contra - Stop', 'blocked');
           } else if (mgLevel < config.mgMaxSteps) {
             mgLevel++;
             activeMartingaleTrade = { type: t.type };
-            logMonitor(`âŒ PERDIDA - Martingala ${mgLevel}/${config.mgMaxSteps}`, 'blocked');
+            logMonitor(`❌ PERDIDA - Martingala ${mgLevel}/${config.mgMaxSteps}`, 'blocked');
           } else {
             stats.l++;
             sessionStats.l++;
             mgLevel = 0;
             activeMartingaleTrade = null;
-            logMonitor('â›” Max Martingala - Stop', 'blocked');
+            logMonitor('⛔ Max Martingala - Stop', 'blocked');
           }
         } else {
           stats.l++;
           sessionStats.l++;
-          logMonitor('âŒ PERDIDA', 'blocked');
+          logMonitor('❌ PERDIDA', 'blocked');
         }
       } else {
-        logMonitor('â†”ï¸ EMPATE', 'info');
+        logMonitor('↔️ EMPATE', 'info');
       }
       
       toRemove.push(i);
@@ -1034,7 +1034,7 @@ function checkStopConditions() {
   if (sc.useTime && sc.timeMin > 0) {
     const elapsedMin = (Date.now() - startTime) / 60000;
     if (elapsedMin >= sc.timeMin) {
-      logMonitor('â± LÃ­mite de tiempo alcanzado', 'blocked');
+      logMonitor('⏱ Límite de tiempo alcanzado', 'blocked');
       stopBot();
       return;
     }
@@ -1045,12 +1045,12 @@ function checkStopConditions() {
     const profitPct = (profit / initialBalance) * 100;
     
     if (sc.profitPct > 0 && profitPct >= sc.profitPct) {
-      logMonitor(`ðŸ’° Take Profit: +${profitPct.toFixed(1)}%`, 'success');
+      logMonitor(`💰 Take Profit: +${profitPct.toFixed(1)}%`, 'success');
       stopBot();
       return;
     }
     if (sc.stopLossPct > 0 && profitPct <= -sc.stopLossPct) {
-      logMonitor(`â›” Stop Loss: ${profitPct.toFixed(1)}%`, 'blocked');
+      logMonitor(`⛔ Stop Loss: ${profitPct.toFixed(1)}%`, 'blocked');
       stopBot();
       return;
     }
@@ -1058,12 +1058,12 @@ function checkStopConditions() {
   
   if (sc.useTrades) {
     if (sc.maxWins > 0 && sessionStats.w >= sc.maxWins) {
-      logMonitor(`ðŸŽ¯ Max wins alcanzado: ${sessionStats.w}`, 'success');
+      logMonitor(`🎯 Max wins alcanzado: ${sessionStats.w}`, 'success');
       stopBot();
       return;
     }
     if (sc.maxLosses > 0 && sessionStats.l >= sc.maxLosses) {
-      logMonitor(`â›” Max losses alcanzado: ${sessionStats.l}`, 'blocked');
+      logMonitor(`⛔ Max losses alcanzado: ${sessionStats.l}`, 'blocked');
       stopBot();
       return;
     }
@@ -1304,7 +1304,7 @@ function startHealthCheck() {
     if (DOM.timerText && DOM.timerFill) {
       const adjustedNow = now + config.timeOffset;
       const sec = Math.ceil((60000 - (adjustedNow % 60000)) / 1000);
-      DOM.timerText.textContent = `â± Cierre: ${sec}s`;
+      DOM.timerText.textContent = `⏱ Cierre: ${sec}s`;
       const pct = ((60 - sec) / 60) * 100;
       DOM.timerFill.style.width = `${pct}%`;
       DOM.timerFill.style.background = sec <= 10 ? '#e74c3c' : sec <= 30 ? '#f1c40f' : '#00e676';
@@ -1353,7 +1353,7 @@ function startBot() {
     DOM.mainBtn.classList.add('btn-stop');
   }
   
-  logMonitor('ðŸŸ¢ Sistema iniciado', 'success');
+  logMonitor('🟢 Sistema iniciado', 'success');
   logMonitor(`Fuente de datos: ${config.useChartData ? 'AUTO (Gráfico+WS)' : 'WebSocket'}`, 'info');
   
   // Cargar histórico si tenemos un par activo
@@ -1541,17 +1541,17 @@ function stopBot() {
     DOM.mainBtn.classList.add('btn-start');
   }
   
-  logMonitor('ðŸ”´ Sistema detenido', 'blocked');
+  logMonitor('�´ Sistema detenido', 'blocked');
   
-  // Resumen de sesiÃ³n
+  // Resumen de sesión
   const sessionTotal = sessionStats.w + sessionStats.l;
   if (sessionTotal > 0) {
     const wr = ((sessionStats.w / sessionTotal) * 100).toFixed(0);
-    logMonitor(`ðŸ“Š SesiÃ³n: ${sessionStats.w}W/${sessionStats.l}L (${wr}%)`, 'info');
+    logMonitor(`📊 Sesión: ${sessionStats.w}W/${sessionStats.l}L (${wr}%)`, 'info');
   }
 }
 
-// ============= INICIALIZACIÃ“N =============
+// ============= INICIALIZACIÓN =============
 function initSystem() {
   if (isSystemReady) return;
   
@@ -1650,7 +1650,7 @@ function initSystem() {
     <span class="dot" id="dot"></span>
     WORBIT SNIPER <span class="hud-version">v${VERSION}</span>
   </div>
-  <button class="close-btn" id="close-btn">âœ•</button>
+  <button class="close-btn" id="close-btn">✕</button>
 </div>
 
 <div class="hud-body">
@@ -1665,7 +1665,7 @@ function initSystem() {
     <div class="switch-box" id="sw-auto"><span class="switch-label">Auto</span></div>
     <div class="switch-box" id="sw-mg"><span class="switch-label">MG</span></div>
     <div class="switch-box" id="sw-inv"><span class="switch-label">INV</span></div>
-    <div class="switch-box" id="sw-chart"><span class="switch-label">ðŸ“Š</span></div>
+    <div class="switch-box" id="sw-chart"><span class="switch-label">📊</span></div>
   </div>
   
   <div class="stats-row">
@@ -1675,8 +1675,8 @@ function initSystem() {
   </div>
   
   <div class="section-header" id="config-header">
-    <span class="section-title">âš™ï¸ ConfiguraciÃ³n</span>
-    <span class="section-toggle" id="config-toggle">â–¼</span>
+    <span class="section-title">⚙️ CONFIGURACIÓN</span>
+    <span class="section-toggle" id="config-toggle">▼</span>
   </div>
   <div class="config-panel" id="config-panel">
     <div class="config-row">
@@ -1701,7 +1701,7 @@ function initSystem() {
     </div>
     <div class="checkbox-row">
       <input type="checkbox" id="chk-confirm">
-      <label for="chk-confirm">ConfirmaciÃ³n extra</label>
+      <label for="chk-confirm">Confirmación extra</label>
     </div>
     <div class="checkbox-row">
       <input type="checkbox" id="chk-next">
@@ -1709,7 +1709,7 @@ function initSystem() {
     </div>
     
     <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.1)">
-      <div style="font-size:10px;color:#888;margin-bottom:8px">STOP AUTOMÃTICO</div>
+      <div style="font-size:10px;color:#888;margin-bottom:8px">STOP AUTOMÁTICO</div>
       <div class="checkbox-row">
         <input type="checkbox" id="chk-time">
         <label for="chk-time">Por tiempo</label>
@@ -1753,7 +1753,7 @@ function initSystem() {
   
   <div class="timer-section">
     <div class="timer-header">
-      <span id="timer-text">â± Cierre: --s</span>
+      <span id="timer-text">⏱ Cierre: --s</span>
       <span id="ui-runtime" class="session-timer">00h 00m</span>
     </div>
     <div id="timer-bar-bg"><div id="timer-bar-fill"></div></div>
@@ -1769,8 +1769,8 @@ function initSystem() {
   
   <div class="monitor-container">
     <div class="section-header" id="log-header">
-      <span class="section-title">ðŸ“‹ REGISTRO</span>
-      <span class="section-toggle" id="log-toggle">â–¼</span>
+      <span class="section-title">📋 REGISTRO</span>
+      <span class="section-toggle" id="log-toggle">▼</span>
     </div>
     <div id="monitor-box">
       <div class="monitor-line"><span class="monitor-time">--:--:--</span> <span class="monitor-info">Sistema listo</span></div>
@@ -1863,15 +1863,15 @@ function initSystem() {
     if (DOM.swInv) DOM.swInv.onclick = function() {
       config.invertTrade = !config.invertTrade;
       this.classList.toggle('active', config.invertTrade);
-      logMonitor(`InversiÃ³n: ${config.invertTrade ? 'ON' : 'OFF'}`);
+      logMonitor(`Inversión: ${config.invertTrade ? 'ON' : 'OFF'}`);
       saveConfigToStorage();
     };
     
-    // NUEVO: Switch para usar datos del grÃ¡fico
+    // NUEVO: Switch para usar datos del gráfico
     if (DOM.swChart) DOM.swChart.onclick = function() {
       config.useChartData = !config.useChartData;
       this.classList.toggle('active', config.useChartData);
-      logMonitor(`Datos del grÃ¡fico: ${config.useChartData ? 'ON' : 'OFF'}`);
+      logMonitor(`Datos del gráfico: ${config.useChartData ? 'ON' : 'OFF'}`);
       saveConfigToStorage();
     };
     
@@ -1898,7 +1898,7 @@ function initSystem() {
     };
     if (DOM.chkConfirm) DOM.chkConfirm.onchange = function() {
       config.useConfirmation = this.checked;
-      logMonitor(`ConfirmaciÃ³n: ${config.useConfirmation ? 'ON' : 'OFF'}`);
+      logMonitor(`Confirmación: ${config.useConfirmation ? 'ON' : 'OFF'}`);
       saveConfigToStorage();
     };
     if (DOM.chkNext) DOM.chkNext.onchange = function() {
@@ -1998,7 +1998,7 @@ window.addEventListener('message', e => {
   if (e.data.type === 'SNIPER_CONNECTION_LOST') {
     wsConnected = false;
     updateConnectionUI(false);
-    logMonitor('ConexiÃ³n perdida', 'blocked');
+    logMonitor('Conexión perdida', 'blocked');
   }
 });
 
