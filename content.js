@@ -30,15 +30,37 @@ function injectMainScript() {
 
 // ============= COMUNICACIÓN CON BACKGROUND =============
 
+// Verificar si el contexto de la extensión es válido
+function isExtensionContextValid() {
+  try {
+    return chrome.runtime && chrome.runtime.id;
+  } catch (e) {
+    return false;
+  }
+}
+
 // Enviar mensaje al background con retry
 async function sendToBackground(message, retries = 3) {
+  // Verificar contexto antes de intentar
+  if (!isExtensionContextValid()) {
+    console.warn('[CS] Contexto de extensión invalidado, recargue la página');
+    return null;
+  }
+
   for (let i = 0; i < retries; i++) {
     try {
       const response = await chrome.runtime.sendMessage(message);
       return response;
     } catch (e) {
+      // Si el contexto se invalidó, no reintentar
+      if (e.message && e.message.includes('Extension context invalidated')) {
+        console.warn('[CS] Extensión recargada, por favor recargue la página');
+        window.postMessage({ type: 'SNIPER_EXTENSION_RELOADED' }, '*');
+        return null;
+      }
       if (i === retries - 1) {
-        console.error('[CS] Error enviando a background después de', retries, 'intentos:', e);
+        // Solo loguear como warning, no como error
+        console.warn('[CS] No se pudo conectar con background:', e.message);
         return null;
       }
       await new Promise(r => setTimeout(r, 100 * (i + 1)));
@@ -130,18 +152,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // ============= KEEP-ALIVE =============
 // Ping periódico para mantener la comunicación activa
 setInterval(() => {
+  // No hacer ping si el contexto es inválido
+  if (!isExtensionContextValid()) {
+    return;
+  }
+
   sendToBackground({ type: 'PING' }).then(response => {
     if (response) {
       reconnectAttempts = 0;
     } else {
       reconnectAttempts++;
       if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-        console.warn('[CS] Perdida conexión con background, notificando...');
+        console.warn('[CS] Perdida conexión con background');
         window.postMessage({ type: 'SNIPER_CONNECTION_LOST' }, '*');
       }
     }
   });
-}, 5000);
+}, 10000); // Aumentado a 10 segundos para reducir carga
 
 // ============= INICIALIZACIÓN =============
 function init() {

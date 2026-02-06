@@ -61,6 +61,8 @@ let config = {
 
 // Estado de trading
 let balance = 0;
+let lastLoggedBalance = 0; // Para evitar loguear el mismo saldo repetidamente
+let balanceLoaded = false; // Flag para indicar que el saldo ya fue cargado
 let isDemo = true;
 let currentAmt = 0;
 let mgLevel = 0;
@@ -1733,6 +1735,8 @@ function readAccount() {
   try {
     let foundBalance = false;
     let foundAccountType = false;
+    let newBalance = 0;
+    let newIsDemo = isDemo;
 
     // ============= MÉTODO PRIORITARIO: BUSCAR "Cuenta demo/real $X,XXX.XX" EN HEADER =============
     try {
@@ -1745,7 +1749,7 @@ function readAccount() {
           // Buscar patrón "Cuenta demo" o "Cuenta real"
           const accountMatch = text.match(/cuenta\s*(demo|real)/i);
           if (accountMatch) {
-            isDemo = accountMatch[1].toLowerCase() === 'demo';
+            newIsDemo = accountMatch[1].toLowerCase() === 'demo';
             foundAccountType = true;
 
             // Buscar el saldo cercano (puede estar en el mismo elemento o en un hermano)
@@ -1754,9 +1758,8 @@ function readAccount() {
               let balanceStr = balanceMatch[1].replace(/,/g, '');
               const parsedBalance = parseFloat(balanceStr);
               if (!isNaN(parsedBalance) && parsedBalance > 0) {
-                balance = parsedBalance;
+                newBalance = parsedBalance;
                 foundBalance = true;
-                logMonitor(`✓ Cuenta ${isDemo ? 'DEMO' : 'REAL'}: $${balance.toFixed(2)}`, 'success');
                 break;
               }
             }
@@ -1771,9 +1774,8 @@ function readAccount() {
                   let balanceStr = sibBalanceMatch[1].replace(/,/g, '');
                   const parsedBalance = parseFloat(balanceStr);
                   if (!isNaN(parsedBalance) && parsedBalance > 0) {
-                    balance = parsedBalance;
+                    newBalance = parsedBalance;
                     foundBalance = true;
-                    logMonitor(`✓ Cuenta ${isDemo ? 'DEMO' : 'REAL'}: $${balance.toFixed(2)}`, 'success');
                     break;
                   }
                 }
@@ -1794,25 +1796,25 @@ function readAccount() {
           const parsed = JSON.parse(walletStore);
           if (parsed && parsed.state) {
             if (typeof parsed.state.isDemo !== 'undefined' && !foundAccountType) {
-              isDemo = parsed.state.isDemo;
+              newIsDemo = parsed.state.isDemo;
               foundAccountType = true;
             }
 
             if (parsed.state.wallets && Array.isArray(parsed.state.wallets) && !foundBalance) {
-              const accountType = isDemo ? 'DEMO' : 'REAL';
+              const accountType = newIsDemo ? 'DEMO' : 'REAL';
               const wallet = parsed.state.wallets.find(w => w.type === accountType);
               if (wallet && typeof wallet.balance !== 'undefined') {
                 let rawBalance = wallet.balance;
                 if (typeof rawBalance === 'string') {
                   rawBalance = rawBalance.replace(/[^0-9.-]/g, '');
                 }
-                balance = parseFloat(rawBalance) || 0;
-                if (balance > 10000 && balance.toString().length >= 6) {
-                  balance = balance / 100;
+                let parsedBal = parseFloat(rawBalance) || 0;
+                if (parsedBal > 10000 && parsedBal.toString().length >= 6) {
+                  parsedBal = parsedBal / 100;
                 }
-                if (balance > 0) {
+                if (parsedBal > 0) {
+                  newBalance = parsedBal;
                   foundBalance = true;
-                  logMonitor(`✓ Saldo desde store: $${balance.toFixed(2)}`, 'success');
                 }
               }
             }
@@ -1835,9 +1837,8 @@ function readAccount() {
               const numStr = match.replace(/[$,\s]/g, '');
               const num = parseFloat(numStr);
               if (!isNaN(num) && num > 1 && num < 10000000) {
-                balance = num;
+                newBalance = num;
                 foundBalance = true;
-                logMonitor(`✓ Saldo detectado: $${balance.toFixed(2)}`, 'success');
                 break;
               }
             }
@@ -1865,9 +1866,8 @@ function readAccount() {
             if (match) {
               const num = parseFloat(match[1].replace(/,/g, ''));
               if (!isNaN(num) && num > 0) {
-                balance = num;
+                newBalance = num;
                 foundBalance = true;
-                logMonitor(`✓ Saldo desde ${selector}: $${balance.toFixed(2)}`, 'success');
                 break;
               }
             }
@@ -1879,11 +1879,26 @@ function readAccount() {
 
     // Si no se detectó tipo de cuenta, asumir DEMO por seguridad
     if (!foundAccountType) {
-      isDemo = true;
-      logMonitor('⚠ Tipo de cuenta no detectado, usando DEMO', 'info');
+      newIsDemo = true;
     }
 
-    // ============= ACTUALIZAR UI =============
+    // ============= ACTUALIZAR ESTADO Y UI =============
+    // Solo actualizar y loguear si hay cambios o es la primera vez
+    const balanceChanged = Math.abs(newBalance - lastLoggedBalance) > 0.01;
+    const shouldLog = foundBalance && (!balanceLoaded || balanceChanged);
+
+    if (foundBalance) {
+      balance = newBalance;
+      isDemo = newIsDemo;
+
+      if (shouldLog) {
+        logMonitor(`✓ Cuenta ${isDemo ? 'DEMO' : 'REAL'}: $${balance.toFixed(2)}`, 'success');
+        lastLoggedBalance = balance;
+        balanceLoaded = true;
+      }
+    }
+
+    // Actualizar UI siempre
     if (DOM.accType) {
       DOM.accType.textContent = isDemo ? 'DEMO' : 'REAL';
       DOM.accType.style.background = isDemo ? 'rgba(241,196,15,.2)' : 'rgba(0,230,118,.2)';
@@ -1894,16 +1909,15 @@ function readAccount() {
       DOM.accBal.style.color = balance > 0 ? '#fff' : '#ff0080';
     }
 
-    // Log de estado final si hay problemas
-    if (!foundBalance) {
+    // Log de errores solo la primera vez
+    if (!balanceLoaded && !foundBalance) {
       logMonitor('⚠ No se pudo detectar saldo', 'blocked');
     }
-    if (!foundAccountType) {
-      logMonitor('⚠ No se pudo detectar tipo de cuenta', 'blocked');
-    }
-    
+
   } catch (e) {
-    logMonitor('❌ Error en readAccount: ' + e.message, 'blocked');
+    if (!balanceLoaded) {
+      logMonitor('❌ Error en readAccount: ' + e.message, 'blocked');
+    }
   }
 }
 
@@ -2208,8 +2222,8 @@ function initSystem() {
       hud.id = 'worbit-hud';
       hud.innerHTML = `
 <style>
-#worbit-hud{position:fixed;top:20px;right:20px;width:280px;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);border-radius:14px;box-shadow:0 0 20px rgba(0,255,255,.4),0 0 40px rgba(0,255,255,.2),0 10px 40px rgba(0,0,0,.6);z-index:999999;font-family:'Segoe UI',system-ui,sans-serif;display:none;border:1px solid rgba(0,255,255,.3);animation:hud-glow 3s ease-in-out infinite;overflow:hidden}
-#worbit-hud.visible{display:block}
+#worbit-hud{position:fixed;top:10px;right:20px;width:320px;max-height:calc(100vh - 20px);background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);border-radius:14px;box-shadow:0 0 20px rgba(0,255,255,.4),0 0 40px rgba(0,255,255,.2),0 10px 40px rgba(0,0,0,.6);z-index:999999;font-family:'Segoe UI',system-ui,sans-serif;display:none;border:1px solid rgba(0,255,255,.3);animation:hud-glow 3s ease-in-out infinite;overflow:hidden;display:flex;flex-direction:column}
+#worbit-hud.visible{display:flex}
 #worbit-hud::-webkit-scrollbar{width:3px}
 #worbit-hud::-webkit-scrollbar-track{background:transparent}
 #worbit-hud::-webkit-scrollbar-thumb{background:rgba(0,255,255,.2);border-radius:2px}
@@ -2221,24 +2235,27 @@ function initSystem() {
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 .close-btn{background:none;border:none;color:#888;cursor:pointer;font-size:16px;padding:2px 6px;border-radius:4px}
 .close-btn:hover{background:rgba(255,255,255,.1);color:#fff}
-.hud-body{padding:8px 12px}
-.account-info{display:flex;gap:8px;margin-bottom:10px;align-items:center}
-.acc-badge{padding:3px 8px;border-radius:5px;font-size:10px;font-weight:700;background:rgba(241,196,15,.2);color:#f1c40f}
-.acc-balance{font-size:14px;font-weight:700;color:#fff}
+.hud-body{padding:12px 16px;flex:1;overflow-y:auto;overflow-x:hidden}
+.hud-body::-webkit-scrollbar{width:4px}
+.hud-body::-webkit-scrollbar-track{background:transparent}
+.hud-body::-webkit-scrollbar-thumb{background:rgba(0,255,255,.3);border-radius:2px}
+.account-info{display:flex;gap:10px;margin-bottom:12px;align-items:center}
+.acc-badge{padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;background:rgba(241,196,15,.2);color:#f1c40f}
+.acc-balance{font-size:16px;font-weight:700;color:#fff}
 .live-price{font-size:10px;padding:2px 6px;border-radius:4px;margin-left:auto}
 .price-up{background:rgba(0,230,118,.2);color:#00e676}
 .price-down{background:rgba(231,76,60,.2);color:#e74c3c}
-.stats-row{display:flex;gap:6px;margin-bottom:10px}
-.stat-item{flex:1;text-align:center;background:rgba(255,255,255,.05);padding:5px;border-radius:6px}
-.stat-val{font-size:14px;font-weight:700;color:#fff}
-.stat-label{font-size:8px;color:#666;text-transform:uppercase;margin-top:1px}
+.stats-row{display:flex;gap:8px;margin-bottom:12px}
+.stat-item{flex:1;text-align:center;background:rgba(255,255,255,.05);padding:8px 6px;border-radius:8px}
+.stat-val{font-size:16px;font-weight:700;color:#fff}
+.stat-label{font-size:9px;color:#666;text-transform:uppercase;margin-top:2px}
 .stat-val.win{color:#00e676}
 .stat-val.loss{color:#e74c3c}
 .section-header{display:flex;align-items:center;justify-content:space-between;padding:6px 0;cursor:pointer;border-top:1px solid rgba(255,255,255,.05);margin-top:6px}
 .section-title{font-size:10px;color:#888;text-transform:uppercase;letter-spacing:1px}
 .section-toggle{color:#666;font-size:9px;transition:transform .2s}
 .section-toggle.open{transform:rotate(180deg)}
-.config-panel{display:none;padding:8px 0;max-height:250px;overflow-y:auto}
+.config-panel{display:none;padding:10px 0;max-height:350px;overflow-y:auto}
 .config-panel.visible{display:block}
 .config-panel::-webkit-scrollbar{width:3px}
 .config-panel::-webkit-scrollbar-track{background:transparent}
@@ -2247,7 +2264,7 @@ function initSystem() {
 .config-label{font-size:10px;color:#aaa;flex:1}
 .config-input{width:55px;padding:4px 6px;border:1px solid rgba(255,255,255,.1);border-radius:5px;background:rgba(0,0,0,.3);color:#fff;font-size:11px;text-align:center}
 .config-input:focus{outline:none;border-color:#00ffff}
-.switch-box{display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,.05);padding:6px 10px;border-radius:6px;cursor:pointer;transition:all .2s;margin-bottom:5px}
+.switch-box{display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,.05);padding:8px 12px;border-radius:8px;cursor:pointer;transition:all .2s;margin-bottom:6px}
 .switch-box:hover{background:rgba(255,255,255,.1)}
 .switch-box.active{background:rgba(0,255,255,.15);border:1px solid rgba(0,255,255,.3)}
 .switch-box.active .switch-label{color:#00ffff}
@@ -2256,16 +2273,16 @@ function initSystem() {
 .switch-toggle::after{content:'';position:absolute;width:14px;height:14px;background:#666;border-radius:50%;top:2px;left:2px;transition:all .2s}
 .switch-box.active .switch-toggle{background:rgba(0,255,255,.3)}
 .switch-box.active .switch-toggle::after{left:16px;background:#00ffff;box-shadow:0 0 6px #00ffff}
-.timer-section{background:rgba(0,0,0,.2);border-radius:8px;padding:8px;margin-bottom:10px}
+.timer-section{background:rgba(0,0,0,.2);border-radius:10px;padding:10px;margin-bottom:12px}
 .timer-header{display:flex;justify-content:space-between;margin-bottom:4px;font-size:10px;color:#aaa}
 .session-timer{color:#00ffff;text-shadow:0 0 5px #00ffff}
 #timer-bar-bg{height:3px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden}
 #timer-bar-fill{height:100%;width:0;background:#00ffff;transition:width .3s,background .3s;box-shadow:0 0 8px #00ffff}
-.info-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:10px}
-.stat-box{background:rgba(255,255,255,.05);padding:5px 3px;border-radius:6px;text-align:center}
-.stat-box .stat-label{font-size:7px;color:#666;text-transform:uppercase;margin-bottom:1px}
-.stat-box .stat-val{font-size:9px;font-weight:600;color:#fff}
-#signal-box{padding:14px;border-radius:10px;text-align:center;margin-bottom:10px;background:linear-gradient(135deg,rgba(0,0,0,.4) 0%,rgba(0,0,0,.2) 100%);transition:all .3s;border:2px solid transparent;min-height:60px}
+.info-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:12px}
+.stat-box{background:rgba(255,255,255,.05);padding:8px 4px;border-radius:8px;text-align:center}
+.stat-box .stat-label{font-size:9px;color:#666;text-transform:uppercase;margin-bottom:2px}
+.stat-box .stat-val{font-size:11px;font-weight:600;color:#fff}
+#signal-box{padding:16px;border-radius:12px;text-align:center;margin-bottom:12px;background:linear-gradient(135deg,rgba(0,0,0,.4) 0%,rgba(0,0,0,.2) 100%);transition:all .3s;border:2px solid transparent;min-height:80px}
 .sig-waiting{border:2px dashed rgba(0,255,255,.3);background:linear-gradient(135deg,rgba(0,20,40,.6) 0%,rgba(0,10,30,.4) 100%)}
 .sig-anticipation{background:linear-gradient(135deg,rgba(255,0,255,.2) 0%,rgba(0,255,255,.1) 100%);border:2px solid rgba(255,0,255,.5);box-shadow:0 0 20px rgba(255,0,255,.3),inset 0 0 30px rgba(255,0,255,.1)}
 .sig-possible-call{background:linear-gradient(135deg,rgba(0,255,136,.25) 0%,rgba(0,255,255,.15) 100%);border:2px solid #00ff88;box-shadow:0 0 25px rgba(0,255,136,.4);animation:neon-call 1.5s ease-in-out infinite}
@@ -2284,9 +2301,9 @@ function initSystem() {
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
 .warmup-bar{height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden;margin:8px 0}
 .warmup-bar-fill{height:100%;background:linear-gradient(90deg,#ff00ff 0%,#00ffff 50%,#00ff88 100%);transition:width .3s;border-radius:2px}
-.monitor-container{margin-bottom:10px}
-#monitor-box{max-height:0;overflow:hidden;transition:max-height .3s;background:rgba(0,0,0,.3);border-radius:6px}
-#monitor-box.visible{max-height:120px;overflow-y:auto;padding:6px}
+.monitor-container{margin-bottom:12px}
+#monitor-box{max-height:0;overflow:hidden;transition:max-height .3s;background:rgba(0,0,0,.3);border-radius:8px}
+#monitor-box.visible{max-height:200px;overflow-y:auto;padding:8px}
 #monitor-box::-webkit-scrollbar{width:3px}
 #monitor-box::-webkit-scrollbar-thumb{background:rgba(0,255,255,.2);border-radius:2px}
 .monitor-line{font-size:9px;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.03);display:flex;gap:6px}
@@ -2295,7 +2312,7 @@ function initSystem() {
 .monitor-success{color:#00ff88;text-shadow:0 0 5px #00ff88}
 .monitor-blocked{color:#ff0080;text-shadow:0 0 5px #ff0080}
 .monitor-pattern{color:#ffff00;text-shadow:0 0 5px #ffff00}
-.btn-main{width:100%;padding:12px;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;text-transform:uppercase;letter-spacing:1px;transition:all .2s}
+.btn-main{width:100%;padding:14px;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;text-transform:uppercase;letter-spacing:1px;transition:all .2s}
 .btn-start{background:linear-gradient(135deg,#00ffff 0%,#00ff88 100%);color:#000;box-shadow:0 0 15px rgba(0,255,255,.4)}
 .btn-start:hover{background:linear-gradient(135deg,#00ff88 0%,#00ffff 100%);transform:translateY(-1px);box-shadow:0 0 25px rgba(0,255,255,.6)}
 .btn-stop{background:linear-gradient(135deg,#ff0080 0%,#ff00ff 100%);color:#fff;box-shadow:0 0 15px rgba(255,0,128,.4)}
