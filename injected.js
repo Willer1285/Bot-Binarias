@@ -1398,6 +1398,92 @@ function updateSignalUI(sec, key) {
   }
 }
 
+// ============= ACTUALIZACIÓN PERIÓDICA DE UI =============
+let uiUpdateInterval = null;
+
+function updateBotUI() {
+  if (!isRunning) {
+    // Bot detenido - mostrar mensaje inicial
+    if (DOM.signalBox && DOM.signalStatus) {
+      DOM.signalBox.className = 'sig-waiting';
+      DOM.signalStatus.innerHTML = `
+        <div class="signal-title" style="color:#00ffff;font-size:11px">INICIAR PARA ANALIZAR</div>
+        <div class="signal-subtitle" style="color:#888;font-size:9px">Presiona el botón para comenzar</div>`;
+    }
+    return;
+  }
+
+  // Bot corriendo - verificar estado de warmup y actualizar UI
+  checkWarmupStatus(); // Actualizar nivel de warmup
+  updateWarmupUI();
+
+  // Actualizar timer
+  const now = Date.now() + config.timeOffset;
+  const sec = Math.ceil((60000 - (now % 60000)) / 1000);
+
+  if (DOM.timerText) {
+    DOM.timerText.textContent = `⏱ Cierre: ${sec}s`;
+  }
+  if (DOM.timerFill) {
+    const pct = ((60 - sec) / 60) * 100;
+    DOM.timerFill.style.width = `${pct}%`;
+    DOM.timerFill.style.background = sec <= 5 ? '#ff0080' : sec <= 15 ? '#ffff00' : '#00ffff';
+  }
+
+  // Actualizar runtime
+  if (DOM.uiRuntime && startTime > 0) {
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    const h = Math.floor(elapsed / 3600);
+    const m = Math.floor((elapsed % 3600) / 60);
+    DOM.uiRuntime.textContent = `${h.toString().padStart(2,'0')}h ${m.toString().padStart(2,'0')}m`;
+  }
+
+  // Actualizar Signal Box basado en estado
+  if (DOM.signalBox && DOM.signalStatus) {
+    if (!isSystemWarmedUp) {
+      // Sistema cargando
+      DOM.signalBox.className = 'sig-waiting';
+      const analysisCandles = getAnalysisCandles();
+      DOM.signalStatus.innerHTML = `
+        <div class="signal-title" style="color:#ff00ff;font-size:12px">CARGANDO SISTEMA</div>
+        <div class="signal-subtitle" style="color:#00ffff;font-size:9px">${systemWarmupLevel}% - ${analysisCandles.length}/${TARGET_CANDLES_FULL} velas</div>`;
+    } else if (tradeExecutedThisCandle) {
+      // Trade en progreso
+      const isCall = lastTradeType === 'call';
+      DOM.signalBox.className = isCall ? 'sig-possible-call' : 'sig-possible-put';
+      DOM.signalStatus.innerHTML = `
+        <div class="signal-title" style="color:${isCall ? '#00ff88' : '#ff0080'};font-size:14px">${isCall ? '▲ COMPRA' : '▼ VENTA'}</div>
+        <div class="signal-subtitle" style="font-size:10px">ESPERANDO RESULTADO...</div>`;
+    } else if (pendingSignal) {
+      // Hay señal pendiente - esto se manejará en updateSignalUI con los segundos correctos
+      // No hacer nada aquí para no sobreescribir
+    } else {
+      // Analizando mercado
+      DOM.signalBox.className = 'sig-waiting';
+      DOM.signalStatus.innerHTML = `
+        <div class="signal-title" style="color:#00ffff;font-size:11px">ANALIZANDO MERCADO</div>
+        <div class="signal-subtitle" style="color:#888;font-size:9px">Buscando oportunidades...</div>`;
+    }
+  }
+}
+
+function startUIUpdateLoop() {
+  if (uiUpdateInterval) clearInterval(uiUpdateInterval);
+  // Actualizar UI cada 500ms para respuesta rápida
+  uiUpdateInterval = setInterval(updateBotUI, 500);
+  // También actualizar inmediatamente
+  updateBotUI();
+}
+
+function stopUIUpdateLoop() {
+  if (uiUpdateInterval) {
+    clearInterval(uiUpdateInterval);
+    uiUpdateInterval = null;
+  }
+  // Actualizar UI una última vez para mostrar estado detenido
+  updateBotUI();
+}
+
 // ============= EJECUCIÓN DE TRADES =============
 function calcAmount() {
   let base = (balance * config.riskPct) / 100;
@@ -1677,9 +1763,12 @@ function updateWarmupUI() {
     if (isSystemWarmedUp) {
       // Ocultar barra cuando el sistema está listo
       DOM.warmupContainer.style.display = 'none';
-    } else if (botActive) {
+    } else if (isRunning) {
       // Mostrar barra solo cuando el bot está activo y cargando
       DOM.warmupContainer.style.display = 'block';
+    } else {
+      // Ocultar si el bot no está corriendo
+      DOM.warmupContainer.style.display = 'none';
     }
   }
 
@@ -1995,7 +2084,8 @@ function startBot() {
   
   setupWebSocketInterceptor();
   startHealthCheck();
-  
+  startUIUpdateLoop(); // Iniciar actualización periódica de UI
+
   // DIAGNÓSTICO: Ejecutar verificación de detección de datos
   setTimeout(() => runDiagnostics(), 500); // Pequeño delay para que todo se inicialice
   
@@ -2177,29 +2267,31 @@ function runDiagnostics() {
 
 function stopBot() {
   isRunning = false;
-  
+
   if (healthCheckInterval) {
     clearInterval(healthCheckInterval);
     healthCheckInterval = null;
   }
-  
+
   if (chartSyncInterval) {
     clearInterval(chartSyncInterval);
     chartSyncInterval = null;
   }
-  
+
   if (wsReconnectTimeout) {
     clearTimeout(wsReconnectTimeout);
     wsReconnectTimeout = null;
   }
-  
+
+  stopUIUpdateLoop(); // Detener actualización de UI y mostrar estado detenido
+
   if (DOM.mainBtn) {
     DOM.mainBtn.textContent = 'INICIAR SISTEMA';
     DOM.mainBtn.classList.remove('btn-stop');
     DOM.mainBtn.classList.add('btn-start');
   }
-  
-  logMonitor('�´ Sistema detenido', 'blocked');
+
+  logMonitor('🔴 Sistema detenido', 'blocked');
   
   // Resumen de sesión
   const sessionTotal = sessionStats.w + sessionStats.l;
