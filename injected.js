@@ -1332,25 +1332,23 @@ function onTick(data) {
 
 // ============= UI DE SEÑALES (CYBERPUNK STYLE) =============
 function updateSignalUI(sec, key) {
-  if (!DOM.signalBox) return;
+  if (!DOM.signalBox || !DOM.signalStatus) return;
 
-  // V12: No mostrar señales si el sistema no está listo
+  // V12: Si el sistema no está listo, mostrar estado de carga
   if (!isSystemWarmedUp) {
     DOM.signalBox.className = 'sig-waiting';
-    DOM.signalBox.innerHTML = `
-      <div class="signal-icon">⏳</div>
-      <div class="signal-title" style="color:#ff00ff;font-size:14px">CARGANDO SISTEMA</div>
-      <div class="signal-subtitle" style="color:#00ffff">${systemWarmupLevel}% - Esperando ${TARGET_CANDLES_FULL} velas</div>`;
+    DOM.signalStatus.innerHTML = `
+      <div class="signal-title" style="color:#ff00ff;font-size:12px">CARGANDO SISTEMA</div>
+      <div class="signal-subtitle" style="color:#00ffff;font-size:9px">Esperando ${TARGET_CANDLES_FULL} velas...</div>`;
     return;
   }
 
   if (tradeExecutedThisCandle) {
     const isCall = lastTradeType === 'call';
     DOM.signalBox.className = isCall ? 'sig-possible-call' : 'sig-possible-put';
-    DOM.signalBox.innerHTML = `
-      <div class="signal-icon">${isCall ? '📈' : '📉'}</div>
-      <div class="signal-title" style="color:${isCall ? '#00ff88' : '#ff0080'}">${isCall ? '▲ COMPRA' : '▼ VENTA'}</div>
-      <div class="signal-subtitle">⏳ ESPERANDO RESULTADO...</div>`;
+    DOM.signalStatus.innerHTML = `
+      <div class="signal-title" style="color:${isCall ? '#00ff88' : '#ff0080'};font-size:14px">${isCall ? '▲ COMPRA' : '▼ VENTA'}</div>
+      <div class="signal-subtitle" style="font-size:10px">ESPERANDO RESULTADO...</div>`;
     return;
   }
 
@@ -1365,11 +1363,10 @@ function updateSignalUI(sec, key) {
 
     if (sec <= triggerSec && sec > (triggerSec - windowSize)) {
       DOM.signalBox.className = isCall ? 'sig-entry-call' : 'sig-entry-put';
-      DOM.signalBox.innerHTML = `
-        <div class="signal-icon">${isCall ? '🚀' : '💥'}</div>
-        <div class="signal-title" style="color:${isCall ? '#00ff88' : '#ff0080'}">${isCall ? '▲▲ COMPRA ▲▲' : '▼▼ VENTA ▼▼'}</div>
+      DOM.signalStatus.innerHTML = `
+        <div class="signal-title" style="color:${isCall ? '#00ff88' : '#ff0080'};font-size:16px">${isCall ? '▲▲ COMPRA ▲▲' : '▼▼ VENTA ▼▼'}</div>
         <div class="entry-countdown" style="color:${isCall ? '#00ff88' : '#ff0080'}">¡¡ ENTRAR AHORA !!</div>
-        <div style="font-size:10px;margin-top:6px;color:#fff">Score: ${score}/10 | ${currentTrend.toUpperCase()}</div>`;
+        <div style="font-size:9px;margin-top:4px;color:#fff">Score: ${score}/10 | ${currentTrend.toUpperCase()}</div>`;
 
       if (!tradeExecutedThisCandle) {
         tradeExecutedThisCandle = true;
@@ -1384,20 +1381,18 @@ function updateSignalUI(sec, key) {
       }
     } else {
       DOM.signalBox.className = 'sig-anticipation';
-      DOM.signalBox.innerHTML = `
-        <div class="signal-icon">${isCall ? '⬆️' : '⬇️'}</div>
-        <div class="anticipation-badge" style="color:${isCall ? '#00ff88' : '#ff0080'}">
+      DOM.signalStatus.innerHTML = `
+        <div class="anticipation-badge" style="color:${isCall ? '#00ff88' : '#ff0080'};padding:4px 10px">
           PREPARAR ${isCall ? '▲ CALL' : '▼ PUT'}
         </div>
-        <div style="font-size:12px;margin-top:8px;color:#fff">Entrada en <span style="color:#ffff00;font-weight:700">${sec}s</span></div>
-        <div style="font-size:10px;margin-top:4px;color:#aaa">Score: ${score}/10</div>`;
+        <div style="font-size:11px;margin-top:6px;color:#fff">Entrada: <span style="color:#ffff00;font-weight:700">${sec}s</span></div>
+        <div style="font-size:9px;margin-top:2px;color:#aaa">Score: ${score}/10</div>`;
     }
   } else {
     DOM.signalBox.className = 'sig-waiting';
-    DOM.signalBox.innerHTML = `
-      <div class="signal-icon">🔍</div>
-      <div class="signal-title" style="color:#00ffff;font-size:12px">ANALIZANDO MERCADO</div>
-      <div class="signal-subtitle" style="color:#888">Buscando oportunidades...</div>`;
+    DOM.signalStatus.innerHTML = `
+      <div class="signal-title" style="color:#00ffff;font-size:11px">ANALIZANDO MERCADO</div>
+      <div class="signal-subtitle" style="color:#888;font-size:9px">Buscando oportunidades...</div>`;
   }
 }
 
@@ -1675,7 +1670,16 @@ function updateStats() {
  * V12: Actualiza la UI del indicador de warmup
  */
 function updateWarmupUI() {
-  if (!DOM.warmupSection) return;
+  // Mostrar/ocultar barra de warmup dinámicamente en el signal-box
+  if (DOM.warmupContainer) {
+    if (isSystemWarmedUp) {
+      // Ocultar barra cuando el sistema está listo
+      DOM.warmupContainer.style.display = 'none';
+    } else if (botActive) {
+      // Mostrar barra solo cuando el bot está activo y cargando
+      DOM.warmupContainer.style.display = 'block';
+    }
+  }
 
   // Actualizar porcentaje
   if (DOM.warmupPct) {
@@ -1687,42 +1691,41 @@ function updateWarmupUI() {
     DOM.warmupBarFill.style.width = `${systemWarmupLevel}%`;
   }
 
-  // Actualizar ícono y texto
-  if (isSystemWarmedUp) {
-    DOM.warmupSection.classList.add('ready');
-    if (DOM.warmupIcon) DOM.warmupIcon.textContent = '✓';
-    if (DOM.warmupText) DOM.warmupText.textContent = 'Sistema listo para operar';
-  } else {
-    DOM.warmupSection.classList.remove('ready');
-    if (DOM.warmupIcon) DOM.warmupIcon.textContent = '🔄';
-    if (DOM.warmupText) {
+  // Actualizar texto de estado
+  if (DOM.warmupText) {
+    if (isSystemWarmedUp) {
+      DOM.warmupText.textContent = 'Listo';
+    } else {
       const analysisCandles = getAnalysisCandles();
-      DOM.warmupText.textContent = `Cargando velas (${analysisCandles.length}/${TARGET_CANDLES_FULL})...`;
+      DOM.warmupText.textContent = `Velas ${analysisCandles.length}/${TARGET_CANDLES_FULL}`;
     }
   }
 
-  // Actualizar indicadores técnicos
+  // Actualizar indicadores técnicos en el info-grid
   if (DOM.indEma) {
     if (emaFast !== null && emaSlow !== null) {
-      const diff = ((emaFast - emaSlow) / emaSlow * 100).toFixed(3);
-      DOM.indEma.textContent = `EMA: ${diff > 0 ? '+' : ''}${diff}%`;
+      const diff = ((emaFast - emaSlow) / emaSlow * 100).toFixed(2);
+      DOM.indEma.textContent = `${diff > 0 ? '+' : ''}${diff}%`;
+      DOM.indEma.style.color = diff > 0 ? '#00ff88' : diff < 0 ? '#ff5555' : '#888';
     } else {
-      DOM.indEma.textContent = 'EMA: --';
+      DOM.indEma.textContent = '--';
+      DOM.indEma.style.color = '#888';
     }
   }
 
   if (DOM.indAtr) {
     if (atrValue !== null) {
-      DOM.indAtr.textContent = `ATR: ${atrValue.toFixed(4)}`;
-      DOM.indAtr.className = `indicator-item ${volatilityLevel === 'high' ? 'bearish' : volatilityLevel === 'low' ? 'neutral' : ''}`;
+      DOM.indAtr.textContent = atrValue.toFixed(4);
+      DOM.indAtr.style.color = volatilityLevel === 'high' ? '#ff5555' : volatilityLevel === 'low' ? '#888' : '#ff00ff';
     } else {
-      DOM.indAtr.textContent = 'ATR: --';
+      DOM.indAtr.textContent = '--';
+      DOM.indAtr.style.color = '#888';
     }
   }
 
   if (DOM.indTrend) {
-    DOM.indTrend.textContent = `TREND: ${currentTrend.toUpperCase()}`;
-    DOM.indTrend.className = `indicator-item ${currentTrend}`;
+    DOM.indTrend.textContent = currentTrend.toUpperCase();
+    DOM.indTrend.style.color = currentTrend === 'bullish' ? '#00ff88' : currentTrend === 'bearish' ? '#ff5555' : '#ffff00';
   }
 }
 
@@ -1730,184 +1733,86 @@ function readAccount() {
   try {
     let foundBalance = false;
     let foundAccountType = false;
-    
-    // ============= MÉTODO 1: ZUSTAND STORE (localStorage) =============
+
+    // ============= MÉTODO PRIORITARIO: BUSCAR "Cuenta demo/real $X,XXX.XX" EN HEADER =============
     try {
-      // Intentar leer del wallet-store de Zustand
-      const walletStore = localStorage.getItem('wallet-store');
-      if (walletStore) {
-        const parsed = JSON.parse(walletStore);
-        if (parsed && parsed.state) {
-          // Detectar tipo de cuenta
-          if (typeof parsed.state.isDemo !== 'undefined') {
-            isDemo = parsed.state.isDemo;
+      // Buscar el texto "Cuenta demo" o "Cuenta real" seguido del saldo
+      const headerElements = document.querySelectorAll('header *, [class*="header"] *, [class*="nav"] *');
+      for (const el of headerElements) {
+        if (el.children.length === 0 || el.tagName === 'SPAN' || el.tagName === 'DIV') {
+          const text = el.textContent || '';
+
+          // Buscar patrón "Cuenta demo" o "Cuenta real"
+          const accountMatch = text.match(/cuenta\s*(demo|real)/i);
+          if (accountMatch) {
+            isDemo = accountMatch[1].toLowerCase() === 'demo';
             foundAccountType = true;
-            logMonitor(`✓ Tipo cuenta desde store: ${isDemo ? 'DEMO' : 'REAL'}`, 'success');
-          }
-          
-          // Obtener saldo de la cuenta activa
-          if (parsed.state.wallets && Array.isArray(parsed.state.wallets)) {
-            const accountType = isDemo ? 'DEMO' : 'REAL';
-            const wallet = parsed.state.wallets.find(w => w.type === accountType);
-            if (wallet && typeof wallet.balance !== 'undefined') {
-              // El balance puede venir en diferentes formatos
-              let rawBalance = wallet.balance;
-              
-              // Si es string, limpiar formato (quitar comas, espacios, etc)
-              if (typeof rawBalance === 'string') {
-                rawBalance = rawBalance.replace(/[^0-9.-]/g, '');
+
+            // Buscar el saldo cercano (puede estar en el mismo elemento o en un hermano)
+            const balanceMatch = text.match(/\$\s*([\d,]+\.?\d*)/);
+            if (balanceMatch) {
+              let balanceStr = balanceMatch[1].replace(/,/g, '');
+              const parsedBalance = parseFloat(balanceStr);
+              if (!isNaN(parsedBalance) && parsedBalance > 0) {
+                balance = parsedBalance;
+                foundBalance = true;
+                logMonitor(`✓ Cuenta ${isDemo ? 'DEMO' : 'REAL'}: $${balance.toFixed(2)}`, 'success');
+                break;
               }
-              
-              balance = parseFloat(rawBalance) || 0;
-              
-              // Si el balance parece estar en centavos (muy grande), dividir por 100
-              // Por ejemplo: 403008 centavos = 4030.08 dólares
-              if (balance > 10000 && balance.toString().length >= 5) {
-                balance = balance / 100;
-                logMonitor(`✓ Saldo desde store (convertido): $${balance.toFixed(2)}`, 'success');
-              } else {
-                logMonitor(`✓ Saldo desde store: $${balance.toFixed(2)}`, 'success');
+            }
+
+            // Si no encontró saldo en el mismo elemento, buscar en elementos cercanos
+            if (!foundBalance) {
+              const parent = el.parentElement;
+              if (parent) {
+                const siblingText = parent.textContent || '';
+                const sibBalanceMatch = siblingText.match(/\$\s*([\d,]+\.?\d*)/);
+                if (sibBalanceMatch) {
+                  let balanceStr = sibBalanceMatch[1].replace(/,/g, '');
+                  const parsedBalance = parseFloat(balanceStr);
+                  if (!isNaN(parsedBalance) && parsedBalance > 0) {
+                    balance = parsedBalance;
+                    foundBalance = true;
+                    logMonitor(`✓ Cuenta ${isDemo ? 'DEMO' : 'REAL'}: $${balance.toFixed(2)}`, 'success');
+                    break;
+                  }
+                }
               }
-              
-              foundBalance = true;
             }
           }
         }
       }
     } catch (e) {
-      logMonitor('⚠ No se pudo leer wallet-store', 'info');
+      console.log('Error buscando en header:', e);
     }
-    
-    // ============= MÉTODO 2: LEER DEL DOM =============
-    if (!foundBalance || !foundAccountType) {
-      // Buscar todos los elementos con texto de cuenta
-      const allText = document.body.innerText;
-      
-      // Buscar tipo de cuenta en el texto visible
-      if (!foundAccountType) {
-        // Buscar indicador de cuenta seleccionada
-        const accountCards = document.querySelectorAll('[class*="_card-account"]');
-        for (const card of accountCards) {
-          const text = card.textContent.toLowerCase();
-          if (card.classList.toString().includes('select') || 
-              card.classList.toString().includes('checked') ||
-              card.querySelector('svg[class*="check"]')) {
-            if (text.includes('demo')) {
-              isDemo = true;
-              foundAccountType = true;
-              logMonitor('✓ Tipo cuenta desde DOM: DEMO', 'success');
-              break;
-            } else if (text.includes('real')) {
-              isDemo = false;
-              foundAccountType = true;
-              logMonitor('✓ Tipo cuenta desde DOM: REAL', 'success');
-              break;
-            }
-          }
-        }
-      }
-      
-      // Si aún no se encontró, buscar en el header
-      if (!foundAccountType) {
-        const headerText = document.querySelector('header')?.textContent?.toLowerCase() || '';
-        if (headerText.includes('cuenta demo')) {
-          isDemo = true;
-          foundAccountType = true;
-          logMonitor('✓ Tipo cuenta desde header: DEMO', 'success');
-        } else if (headerText.includes('cuenta real')) {
-          isDemo = false;
-          foundAccountType = true;
-          logMonitor('✓ Tipo cuenta desde header: REAL', 'success');
-        }
-      }
-      
-      // Buscar saldo en elementos con clases específicas
-      if (!foundBalance) {
-        const balanceSelectors = [
-          '[class*="_account-value_"]',
-          '[class*="_balance"]',
-          '[class*="balance-amount"]',
-          '[class*="account-balance"]'
-        ];
-        
-        for (const selector of balanceSelectors) {
-          const elements = document.querySelectorAll(selector);
-          for (const el of elements) {
-            const parent = el.closest('[class*="_card-account"]') || el.parentElement;
-            const parentText = parent?.textContent?.toLowerCase() || '';
-            const targetType = isDemo ? 'demo' : 'real';
-            
-            // Verificar si este elemento corresponde al tipo de cuenta activo
-            if (parentText.includes(targetType) || parentText.includes('cuenta ' + targetType)) {
-              // Limpiar el texto: quitar todo excepto números, puntos y comas
-              let text = el.textContent.replace(/[^0-9.,]/g, '');
-              
-              // Manejar formato con comas (4,030.08 -> 4030.08)
-              // Si hay coma Y punto, la coma es separador de miles
-              if (text.includes(',') && text.includes('.')) {
-                text = text.replace(/,/g, ''); // Eliminar todas las comas
-              } 
-              // Si solo hay coma, podría ser separador decimal (4,03)
-              else if (text.includes(',') && !text.includes('.')) {
-                text = text.replace(',', '.'); // Convertir coma a punto
-              }
-              
-              const parsedBalance = parseFloat(text);
-              if (!isNaN(parsedBalance) && parsedBalance >= 0) {
-                balance = parsedBalance;
-                foundBalance = true;
-                logMonitor(`✓ Saldo desde DOM (${selector}): $${balance.toFixed(2)}`, 'success');
-                break;
-              }
-            }
-          }
-          if (foundBalance) break;
-        }
-      }
-    }
-    
-    // ============= MÉTODO 3: GLOBAL VARIABLES =============
+
+    // ============= MÉTODO 2: ZUSTAND STORE (localStorage) =============
     if (!foundBalance || !foundAccountType) {
       try {
-        // Buscar en variables globales de Worbit
-        if (window.__NUXT__ && window.__NUXT__.state) {
-          const state = window.__NUXT__.state;
-          if (state.wallet) {
-            if (typeof state.wallet.isDemo !== 'undefined' && !foundAccountType) {
-              isDemo = state.wallet.isDemo;
+        const walletStore = localStorage.getItem('wallet-store');
+        if (walletStore) {
+          const parsed = JSON.parse(walletStore);
+          if (parsed && parsed.state) {
+            if (typeof parsed.state.isDemo !== 'undefined' && !foundAccountType) {
+              isDemo = parsed.state.isDemo;
               foundAccountType = true;
-              logMonitor('✓ Tipo cuenta desde __NUXT__: ' + (isDemo ? 'DEMO' : 'REAL'), 'success');
             }
-            if (typeof state.wallet.balance !== 'undefined' && !foundBalance) {
-              balance = parseFloat(state.wallet.balance) || 0;
-              foundBalance = true;
-              logMonitor(`✓ Saldo desde __NUXT__: $${balance.toFixed(2)}`, 'success');
-            }
-          }
-        }
-      } catch (e) {}
-    }
-    
-    // ============= MÉTODO 4: BÚSQUEDA AGRESIVA EN DOM =============
-    if (!foundBalance) {
-      try {
-        // Buscar cualquier elemento que contenga un valor monetario cerca del header
-        const headerArea = document.querySelector('header') || document.querySelector('[class*="header"]');
-        if (headerArea) {
-          const allElements = headerArea.querySelectorAll('*');
-          for (const el of allElements) {
-            if (el.children.length === 0) { // Solo elementos de texto
-              const text = el.textContent.trim();
-              // Buscar patrones como $1,234.56 o 1234.56 o $1234
-              const moneyMatch = text.match(/\$?\s*([\d,]+\.?\d*)/);
-              if (moneyMatch) {
-                let value = moneyMatch[1].replace(/,/g, '');
-                const parsed = parseFloat(value);
-                if (!isNaN(parsed) && parsed > 0 && parsed < 1000000) {
-                  balance = parsed;
+
+            if (parsed.state.wallets && Array.isArray(parsed.state.wallets) && !foundBalance) {
+              const accountType = isDemo ? 'DEMO' : 'REAL';
+              const wallet = parsed.state.wallets.find(w => w.type === accountType);
+              if (wallet && typeof wallet.balance !== 'undefined') {
+                let rawBalance = wallet.balance;
+                if (typeof rawBalance === 'string') {
+                  rawBalance = rawBalance.replace(/[^0-9.-]/g, '');
+                }
+                balance = parseFloat(rawBalance) || 0;
+                if (balance > 10000 && balance.toString().length >= 6) {
+                  balance = balance / 100;
+                }
+                if (balance > 0) {
                   foundBalance = true;
-                  logMonitor(`✓ Saldo desde header: $${balance.toFixed(2)}`, 'success');
-                  break;
+                  logMonitor(`✓ Saldo desde store: $${balance.toFixed(2)}`, 'success');
                 }
               }
             }
@@ -1916,27 +1821,51 @@ function readAccount() {
       } catch (e) {}
     }
 
-    // ============= MÉTODO 5: BUSCAR EN SELECTORES COMUNES DE WORBIT =============
+    // ============= MÉTODO 3: BUSCAR CUALQUIER SALDO VISIBLE EN HEADER =============
     if (!foundBalance) {
       try {
-        const commonSelectors = [
-          '[data-testid*="balance"]',
-          '[class*="wallet"] [class*="value"]',
-          '[class*="account"] [class*="amount"]',
-          '[class*="money"]',
-          '[class*="currency"]'
+        // Buscar elementos que contengan "$" y números en el header
+        const headerArea = document.querySelector('header') || document.querySelector('[class*="header"]');
+        if (headerArea) {
+          const textContent = headerArea.textContent || '';
+          const allBalances = textContent.match(/\$\s*([\d,]+\.?\d*)/g);
+          if (allBalances && allBalances.length > 0) {
+            // Tomar el primer saldo que parezca razonable (mayor a $1)
+            for (const match of allBalances) {
+              const numStr = match.replace(/[$,\s]/g, '');
+              const num = parseFloat(numStr);
+              if (!isNaN(num) && num > 1 && num < 10000000) {
+                balance = num;
+                foundBalance = true;
+                logMonitor(`✓ Saldo detectado: $${balance.toFixed(2)}`, 'success');
+                break;
+              }
+            }
+          }
+        }
+      } catch (e) {}
+    }
+
+    // ============= MÉTODO 4: SELECTORES ESPECÍFICOS DE WORBIT =============
+    if (!foundBalance) {
+      try {
+        const specificSelectors = [
+          '[class*="account-value"]',
+          '[class*="balance-value"]',
+          '[class*="wallet-balance"]',
+          '[class*="_balance_"]',
+          '[class*="money-value"]'
         ];
 
-        for (const selector of commonSelectors) {
+        for (const selector of specificSelectors) {
           const elements = document.querySelectorAll(selector);
           for (const el of elements) {
-            const text = el.textContent.trim();
-            const moneyMatch = text.match(/([\d,]+\.?\d*)/);
-            if (moneyMatch) {
-              let value = moneyMatch[1].replace(/,/g, '');
-              const parsed = parseFloat(value);
-              if (!isNaN(parsed) && parsed > 0 && parsed < 1000000) {
-                balance = parsed;
+            const text = el.textContent || '';
+            const match = text.match(/([\d,]+\.?\d*)/);
+            if (match) {
+              const num = parseFloat(match[1].replace(/,/g, ''));
+              if (!isNaN(num) && num > 0) {
+                balance = num;
                 foundBalance = true;
                 logMonitor(`✓ Saldo desde ${selector}: $${balance.toFixed(2)}`, 'success');
                 break;
@@ -1948,23 +1877,23 @@ function readAccount() {
       } catch (e) {}
     }
 
-    // Si aún no hay balance, usar valor por defecto y mostrar advertencia
-    if (!foundBalance) {
-      logMonitor('⚠ No se detectó saldo automáticamente', 'pattern');
-      logMonitor('ℹ Verifica que la página esté completamente cargada', 'info');
+    // Si no se detectó tipo de cuenta, asumir DEMO por seguridad
+    if (!foundAccountType) {
+      isDemo = true;
+      logMonitor('⚠ Tipo de cuenta no detectado, usando DEMO', 'info');
     }
 
     // ============= ACTUALIZAR UI =============
     if (DOM.accType) {
       DOM.accType.textContent = isDemo ? 'DEMO' : 'REAL';
-      DOM.accType.style.background = isDemo ? 'rgba(241,196,15,.2)' : 'rgba(231,76,60,.2)';
-      DOM.accType.style.color = isDemo ? '#f1c40f' : '#e74c3c';
+      DOM.accType.style.background = isDemo ? 'rgba(241,196,15,.2)' : 'rgba(0,230,118,.2)';
+      DOM.accType.style.color = isDemo ? '#f1c40f' : '#00e676';
     }
     if (DOM.accBal) {
       DOM.accBal.textContent = `$${balance.toFixed(2)}`;
       DOM.accBal.style.color = balance > 0 ? '#fff' : '#ff0080';
     }
-    
+
     // Log de estado final si hay problemas
     if (!foundBalance) {
       logMonitor('⚠ No se pudo detectar saldo', 'blocked');
@@ -2279,111 +2208,105 @@ function initSystem() {
       hud.id = 'worbit-hud';
       hud.innerHTML = `
 <style>
-#worbit-hud{position:fixed;top:20px;right:20px;width:320px;max-height:90vh;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);border-radius:16px;box-shadow:0 0 20px rgba(0,255,255,.4),0 0 40px rgba(0,255,255,.2),0 10px 40px rgba(0,0,0,.6);z-index:999999;font-family:'Segoe UI',system-ui,sans-serif;display:none;border:1px solid rgba(0,255,255,.3);overflow:hidden;animation:hud-glow 3s ease-in-out infinite}
-#worbit-hud.visible{display:flex;flex-direction:column}
+#worbit-hud{position:fixed;top:20px;right:20px;width:280px;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);border-radius:14px;box-shadow:0 0 20px rgba(0,255,255,.4),0 0 40px rgba(0,255,255,.2),0 10px 40px rgba(0,0,0,.6);z-index:999999;font-family:'Segoe UI',system-ui,sans-serif;display:none;border:1px solid rgba(0,255,255,.3);animation:hud-glow 3s ease-in-out infinite;overflow:hidden}
+#worbit-hud.visible{display:block}
+#worbit-hud::-webkit-scrollbar{width:3px}
+#worbit-hud::-webkit-scrollbar-track{background:transparent}
+#worbit-hud::-webkit-scrollbar-thumb{background:rgba(0,255,255,.2);border-radius:2px}
 @keyframes hud-glow{0%,100%{box-shadow:0 0 20px rgba(0,255,255,.4),0 0 40px rgba(0,255,255,.2),0 10px 40px rgba(0,0,0,.6)}50%{box-shadow:0 0 30px rgba(0,255,255,.6),0 0 60px rgba(0,255,255,.3),0 10px 40px rgba(0,0,0,.6)}}
-.hud-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:linear-gradient(90deg,#0f3460 0%,#16213e 100%);border-bottom:1px solid rgba(0,255,255,.2);cursor:grab;flex-shrink:0}
-.hud-title{display:flex;align-items:center;gap:10px;font-weight:700;font-size:14px;color:#fff;text-transform:uppercase;letter-spacing:1px}
-.hud-version{font-size:10px;color:#00ffff;font-weight:400;text-shadow:0 0 10px #00ffff}
-.dot{width:10px;height:10px;border-radius:50%;background:#e74c3c;box-shadow:0 0 8px #e74c3c;animation:pulse 2s infinite}
+.hud-header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:linear-gradient(90deg,#0f3460 0%,#16213e 100%);border-bottom:1px solid rgba(0,255,255,.2);cursor:grab}
+.hud-title{display:flex;align-items:center;gap:8px;font-weight:700;font-size:13px;color:#fff;text-transform:uppercase;letter-spacing:1px}
+.hud-version{font-size:9px;color:#00ffff;font-weight:400;text-shadow:0 0 10px #00ffff}
+.dot{width:8px;height:8px;border-radius:50%;background:#e74c3c;box-shadow:0 0 6px #e74c3c;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
-.close-btn{background:none;border:none;color:#888;cursor:pointer;font-size:18px;padding:4px 8px;border-radius:4px}
+.close-btn{background:none;border:none;color:#888;cursor:pointer;font-size:16px;padding:2px 6px;border-radius:4px}
 .close-btn:hover{background:rgba(255,255,255,.1);color:#fff}
-.hud-body{padding:12px 16px;overflow-y:auto;flex:1}
-.account-info{display:flex;gap:10px;margin-bottom:12px;align-items:center}
-.acc-badge{padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;background:rgba(241,196,15,.2);color:#f1c40f}
-.acc-balance{font-size:16px;font-weight:700;color:#fff}
-.live-price{font-size:11px;padding:3px 8px;border-radius:4px;margin-left:auto}
+.hud-body{padding:8px 12px}
+.account-info{display:flex;gap:8px;margin-bottom:10px;align-items:center}
+.acc-badge{padding:3px 8px;border-radius:5px;font-size:10px;font-weight:700;background:rgba(241,196,15,.2);color:#f1c40f}
+.acc-balance{font-size:14px;font-weight:700;color:#fff}
+.live-price{font-size:10px;padding:2px 6px;border-radius:4px;margin-left:auto}
 .price-up{background:rgba(0,230,118,.2);color:#00e676}
 .price-down{background:rgba(231,76,60,.2);color:#e74c3c}
-.stats-row{display:flex;gap:10px;margin-bottom:12px}
-.stat-item{flex:1;text-align:center;background:rgba(255,255,255,.05);padding:8px;border-radius:8px}
-.stat-val{font-size:18px;font-weight:700;color:#fff}
-.stat-label{font-size:9px;color:#666;text-transform:uppercase;margin-top:2px}
+.stats-row{display:flex;gap:6px;margin-bottom:10px}
+.stat-item{flex:1;text-align:center;background:rgba(255,255,255,.05);padding:5px;border-radius:6px}
+.stat-val{font-size:14px;font-weight:700;color:#fff}
+.stat-label{font-size:8px;color:#666;text-transform:uppercase;margin-top:1px}
 .stat-val.win{color:#00e676}
 .stat-val.loss{color:#e74c3c}
-.section-header{display:flex;align-items:center;justify-content:space-between;padding:8px 0;cursor:pointer;border-top:1px solid rgba(255,255,255,.05);margin-top:8px}
-.section-title{font-size:11px;color:#888;text-transform:uppercase;letter-spacing:1px}
-.section-toggle{color:#666;font-size:10px;transition:transform .2s}
+.section-header{display:flex;align-items:center;justify-content:space-between;padding:6px 0;cursor:pointer;border-top:1px solid rgba(255,255,255,.05);margin-top:6px}
+.section-title{font-size:10px;color:#888;text-transform:uppercase;letter-spacing:1px}
+.section-toggle{color:#666;font-size:9px;transition:transform .2s}
 .section-toggle.open{transform:rotate(180deg)}
-.config-panel{display:none;padding:10px 0;max-height:300px;overflow-y:auto}
+.config-panel{display:none;padding:8px 0;max-height:250px;overflow-y:auto}
 .config-panel.visible{display:block}
-.config-panel::-webkit-scrollbar{width:4px}
-.config-panel::-webkit-scrollbar-track{background:rgba(255,255,255,.05);border-radius:2px}
-.config-panel::-webkit-scrollbar-thumb{background:rgba(0,255,255,.3);border-radius:2px}
-.config-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}
-.config-label{font-size:11px;color:#aaa;flex:1}
-.config-input{width:60px;padding:6px 8px;border:1px solid rgba(255,255,255,.1);border-radius:6px;background:rgba(0,0,0,.3);color:#fff;font-size:12px;text-align:center}
+.config-panel::-webkit-scrollbar{width:3px}
+.config-panel::-webkit-scrollbar-track{background:transparent}
+.config-panel::-webkit-scrollbar-thumb{background:rgba(0,255,255,.2);border-radius:2px}
+.config-row{display:flex;align-items:center;gap:6px;margin-bottom:6px}
+.config-label{font-size:10px;color:#aaa;flex:1}
+.config-input{width:55px;padding:4px 6px;border:1px solid rgba(255,255,255,.1);border-radius:5px;background:rgba(0,0,0,.3);color:#fff;font-size:11px;text-align:center}
 .config-input:focus{outline:none;border-color:#00ffff}
-.switch-box{display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,.05);padding:8px 12px;border-radius:8px;cursor:pointer;transition:all .2s;margin-bottom:6px}
+.switch-box{display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,.05);padding:6px 10px;border-radius:6px;cursor:pointer;transition:all .2s;margin-bottom:5px}
 .switch-box:hover{background:rgba(255,255,255,.1)}
 .switch-box.active{background:rgba(0,255,255,.15);border:1px solid rgba(0,255,255,.3)}
 .switch-box.active .switch-label{color:#00ffff}
-.switch-label{font-size:11px;color:#aaa}
-.switch-toggle{width:36px;height:20px;background:rgba(255,255,255,.1);border-radius:10px;position:relative;transition:all .2s}
-.switch-toggle::after{content:'';position:absolute;width:16px;height:16px;background:#666;border-radius:50%;top:2px;left:2px;transition:all .2s}
+.switch-label{font-size:10px;color:#aaa}
+.switch-toggle{width:32px;height:18px;background:rgba(255,255,255,.1);border-radius:9px;position:relative;transition:all .2s}
+.switch-toggle::after{content:'';position:absolute;width:14px;height:14px;background:#666;border-radius:50%;top:2px;left:2px;transition:all .2s}
 .switch-box.active .switch-toggle{background:rgba(0,255,255,.3)}
-.switch-box.active .switch-toggle::after{left:18px;background:#00ffff;box-shadow:0 0 8px #00ffff}
-.timer-section{background:rgba(0,0,0,.2);border-radius:10px;padding:10px;margin-bottom:12px}
-.timer-header{display:flex;justify-content:space-between;margin-bottom:6px;font-size:11px;color:#aaa}
+.switch-box.active .switch-toggle::after{left:16px;background:#00ffff;box-shadow:0 0 6px #00ffff}
+.timer-section{background:rgba(0,0,0,.2);border-radius:8px;padding:8px;margin-bottom:10px}
+.timer-header{display:flex;justify-content:space-between;margin-bottom:4px;font-size:10px;color:#aaa}
 .session-timer{color:#00ffff;text-shadow:0 0 5px #00ffff}
-#timer-bar-bg{height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden}
-#timer-bar-fill{height:100%;width:0;background:#00ffff;transition:width .3s,background .3s;box-shadow:0 0 10px #00ffff}
-.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
-.stat-box{background:rgba(255,255,255,.05);padding:8px;border-radius:8px;text-align:center}
-.stat-box .stat-label{font-size:9px;color:#666;text-transform:uppercase;margin-bottom:2px}
-.stat-box .stat-val{font-size:13px;font-weight:600;color:#fff}
-#signal-box{padding:20px;border-radius:12px;text-align:center;margin-bottom:12px;background:linear-gradient(135deg,rgba(0,0,0,.4) 0%,rgba(0,0,0,.2) 100%);transition:all .3s;border:2px solid transparent}
+#timer-bar-bg{height:3px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden}
+#timer-bar-fill{height:100%;width:0;background:#00ffff;transition:width .3s,background .3s;box-shadow:0 0 8px #00ffff}
+.info-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:10px}
+.stat-box{background:rgba(255,255,255,.05);padding:5px 3px;border-radius:6px;text-align:center}
+.stat-box .stat-label{font-size:7px;color:#666;text-transform:uppercase;margin-bottom:1px}
+.stat-box .stat-val{font-size:9px;font-weight:600;color:#fff}
+#signal-box{padding:14px;border-radius:10px;text-align:center;margin-bottom:10px;background:linear-gradient(135deg,rgba(0,0,0,.4) 0%,rgba(0,0,0,.2) 100%);transition:all .3s;border:2px solid transparent;min-height:60px}
 .sig-waiting{border:2px dashed rgba(0,255,255,.3);background:linear-gradient(135deg,rgba(0,20,40,.6) 0%,rgba(0,10,30,.4) 100%)}
-.sig-waiting .signal-status{color:#00ffff;text-shadow:0 0 10px rgba(0,255,255,.5)}
 .sig-anticipation{background:linear-gradient(135deg,rgba(255,0,255,.2) 0%,rgba(0,255,255,.1) 100%);border:2px solid rgba(255,0,255,.5);box-shadow:0 0 20px rgba(255,0,255,.3),inset 0 0 30px rgba(255,0,255,.1)}
-.sig-possible-call{background:linear-gradient(135deg,rgba(0,255,136,.25) 0%,rgba(0,255,255,.15) 100%);border:2px solid #00ff88;box-shadow:0 0 25px rgba(0,255,136,.4),inset 0 0 30px rgba(0,255,136,.1);animation:neon-call 1.5s ease-in-out infinite}
-.sig-possible-put{background:linear-gradient(135deg,rgba(255,0,128,.25) 0%,rgba(255,0,255,.15) 100%);border:2px solid #ff0080;box-shadow:0 0 25px rgba(255,0,128,.4),inset 0 0 30px rgba(255,0,128,.1);animation:neon-put 1.5s ease-in-out infinite}
-.sig-entry-call{background:linear-gradient(135deg,rgba(0,255,136,.4) 0%,rgba(0,255,255,.2) 100%);border:3px solid #00ff88;box-shadow:0 0 40px rgba(0,255,136,.6),0 0 80px rgba(0,255,136,.3),inset 0 0 40px rgba(0,255,136,.2);animation:neon-entry-call .5s ease-in-out infinite}
-.sig-entry-put{background:linear-gradient(135deg,rgba(255,0,128,.4) 0%,rgba(255,0,255,.2) 100%);border:3px solid #ff0080;box-shadow:0 0 40px rgba(255,0,128,.6),0 0 80px rgba(255,0,128,.3),inset 0 0 40px rgba(255,0,128,.2);animation:neon-entry-put .5s ease-in-out infinite}
-@keyframes neon-call{0%,100%{box-shadow:0 0 25px rgba(0,255,136,.4),inset 0 0 30px rgba(0,255,136,.1)}50%{box-shadow:0 0 35px rgba(0,255,136,.6),inset 0 0 40px rgba(0,255,136,.2)}}
-@keyframes neon-put{0%,100%{box-shadow:0 0 25px rgba(255,0,128,.4),inset 0 0 30px rgba(255,0,128,.1)}50%{box-shadow:0 0 35px rgba(255,0,128,.6),inset 0 0 40px rgba(255,0,128,.2)}}
-@keyframes neon-entry-call{0%,100%{box-shadow:0 0 40px rgba(0,255,136,.6),0 0 80px rgba(0,255,136,.3)}50%{box-shadow:0 0 60px rgba(0,255,136,.8),0 0 100px rgba(0,255,136,.5)}}
-@keyframes neon-entry-put{0%,100%{box-shadow:0 0 40px rgba(255,0,128,.6),0 0 80px rgba(255,0,128,.3)}50%{box-shadow:0 0 60px rgba(255,0,128,.8),0 0 100px rgba(255,0,128,.5)}}
-.signal-title{font-size:20px;font-weight:800;text-transform:uppercase;letter-spacing:2px;margin-bottom:6px;text-shadow:0 0 20px currentColor}
-.signal-subtitle{font-size:11px;opacity:.8}
-.signal-icon{font-size:32px;margin-bottom:8px;filter:drop-shadow(0 0 10px currentColor)}
-.anticipation-badge{display:inline-block;padding:8px 20px;background:linear-gradient(135deg,rgba(255,0,255,.4) 0%,rgba(0,255,255,.3) 100%);border-radius:25px;font-size:14px;font-weight:700;color:#fff;text-shadow:0 0 10px #ff00ff;border:1px solid rgba(255,0,255,.5);animation:badge-pulse 1s ease-in-out infinite}
-@keyframes badge-pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
-.entry-countdown{margin-top:10px;font-size:14px;font-weight:700;color:#fff;animation:blink .3s infinite;text-shadow:0 0 15px currentColor}
+.sig-possible-call{background:linear-gradient(135deg,rgba(0,255,136,.25) 0%,rgba(0,255,255,.15) 100%);border:2px solid #00ff88;box-shadow:0 0 25px rgba(0,255,136,.4);animation:neon-call 1.5s ease-in-out infinite}
+.sig-possible-put{background:linear-gradient(135deg,rgba(255,0,128,.25) 0%,rgba(255,0,255,.15) 100%);border:2px solid #ff0080;box-shadow:0 0 25px rgba(255,0,128,.4);animation:neon-put 1.5s ease-in-out infinite}
+.sig-entry-call{background:linear-gradient(135deg,rgba(0,255,136,.4) 0%,rgba(0,255,255,.2) 100%);border:3px solid #00ff88;box-shadow:0 0 40px rgba(0,255,136,.6),0 0 80px rgba(0,255,136,.3);animation:neon-entry-call .5s ease-in-out infinite}
+.sig-entry-put{background:linear-gradient(135deg,rgba(255,0,128,.4) 0%,rgba(255,0,255,.2) 100%);border:3px solid #ff0080;box-shadow:0 0 40px rgba(255,0,128,.6),0 0 80px rgba(255,0,128,.3);animation:neon-entry-put .5s ease-in-out infinite}
+@keyframes neon-call{0%,100%{box-shadow:0 0 25px rgba(0,255,136,.4)}50%{box-shadow:0 0 35px rgba(0,255,136,.6)}}
+@keyframes neon-put{0%,100%{box-shadow:0 0 25px rgba(255,0,128,.4)}50%{box-shadow:0 0 35px rgba(255,0,128,.6)}}
+@keyframes neon-entry-call{0%,100%{box-shadow:0 0 40px rgba(0,255,136,.6)}50%{box-shadow:0 0 60px rgba(0,255,136,.8)}}
+@keyframes neon-entry-put{0%,100%{box-shadow:0 0 40px rgba(255,0,128,.6)}50%{box-shadow:0 0 60px rgba(255,0,128,.8)}}
+.signal-title{font-size:16px;font-weight:800;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;text-shadow:0 0 15px currentColor}
+.signal-subtitle{font-size:10px;opacity:.8}
+.anticipation-badge{display:inline-block;padding:6px 14px;background:linear-gradient(135deg,rgba(255,0,255,.4) 0%,rgba(0,255,255,.3) 100%);border-radius:20px;font-size:12px;font-weight:700;color:#fff;text-shadow:0 0 10px #ff00ff;border:1px solid rgba(255,0,255,.5);animation:badge-pulse 1s ease-in-out infinite}
+@keyframes badge-pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.03)}}
+.entry-countdown{margin-top:6px;font-size:12px;font-weight:700;color:#fff;animation:blink .3s infinite;text-shadow:0 0 10px currentColor}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
-.monitor-container{margin-bottom:12px}
-#monitor-box{max-height:0;overflow:hidden;transition:max-height .3s;background:rgba(0,0,0,.3);border-radius:8px}
-#monitor-box.visible{max-height:150px;overflow-y:auto;padding:8px}
-.monitor-line{font-size:10px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.03);display:flex;gap:8px}
+.warmup-bar{height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden;margin:8px 0}
+.warmup-bar-fill{height:100%;background:linear-gradient(90deg,#ff00ff 0%,#00ffff 50%,#00ff88 100%);transition:width .3s;border-radius:2px}
+.monitor-container{margin-bottom:10px}
+#monitor-box{max-height:0;overflow:hidden;transition:max-height .3s;background:rgba(0,0,0,.3);border-radius:6px}
+#monitor-box.visible{max-height:120px;overflow-y:auto;padding:6px}
+#monitor-box::-webkit-scrollbar{width:3px}
+#monitor-box::-webkit-scrollbar-thumb{background:rgba(0,255,255,.2);border-radius:2px}
+.monitor-line{font-size:9px;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.03);display:flex;gap:6px}
 .monitor-time{color:#666;font-family:monospace}
 .monitor-info{color:#aaa}
 .monitor-success{color:#00ff88;text-shadow:0 0 5px #00ff88}
 .monitor-blocked{color:#ff0080;text-shadow:0 0 5px #ff0080}
 .monitor-pattern{color:#ffff00;text-shadow:0 0 5px #ffff00}
-.btn-main{width:100%;padding:14px;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;text-transform:uppercase;letter-spacing:1px;transition:all .2s}
-.btn-start{background:linear-gradient(135deg,#00ffff 0%,#00ff88 100%);color:#000;box-shadow:0 0 20px rgba(0,255,255,.4)}
-.btn-start:hover{background:linear-gradient(135deg,#00ff88 0%,#00ffff 100%);transform:translateY(-1px);box-shadow:0 0 30px rgba(0,255,255,.6)}
-.btn-stop{background:linear-gradient(135deg,#ff0080 0%,#ff00ff 100%);color:#fff;box-shadow:0 0 20px rgba(255,0,128,.4)}
-.btn-stop:hover{background:linear-gradient(135deg,#ff00ff 0%,#ff0080 100%);box-shadow:0 0 30px rgba(255,0,128,.6)}
-.source-badge{font-size:9px;padding:2px 6px;border-radius:4px;background:rgba(0,255,255,.2);color:#00ffff;margin-left:auto}
-.warmup-section{margin:10px 0;padding:12px;background:linear-gradient(135deg,rgba(0,0,0,.4) 0%,rgba(0,20,40,.3) 100%);border-radius:12px;border:1px solid rgba(0,255,255,.2)}
-.warmup-section.ready{border-color:rgba(0,255,136,.5);background:linear-gradient(135deg,rgba(0,255,136,.1) 0%,rgba(0,40,20,.3) 100%);box-shadow:0 0 20px rgba(0,255,136,.2)}
-.warmup-header{display:flex;align-items:center;gap:8px;margin-bottom:10px}
-.warmup-icon{font-size:16px;filter:drop-shadow(0 0 5px currentColor)}
-.warmup-text{flex:1;font-size:11px;color:#aaa}
-.warmup-section.ready .warmup-text{color:#00ff88;text-shadow:0 0 5px #00ff88}
-.warmup-pct{font-size:14px;font-weight:700;color:#ffff00;text-shadow:0 0 10px #ffff00}
-.warmup-section.ready .warmup-pct{color:#00ff88;text-shadow:0 0 10px #00ff88}
-.warmup-bar-bg{height:6px;background:rgba(255,255,255,.1);border-radius:3px;overflow:hidden;margin-bottom:10px}
-.warmup-bar-fill{height:100%;background:linear-gradient(90deg,#ff00ff 0%,#00ffff 50%,#00ff88 100%);transition:width .3s;border-radius:3px;box-shadow:0 0 10px rgba(0,255,255,.5)}
-.warmup-section.ready .warmup-bar-fill{background:linear-gradient(90deg,#00ff88 0%,#00ffff 100%)}
-.warmup-indicators{display:flex;gap:6px;flex-wrap:wrap}
-.indicator-item{font-size:10px;padding:4px 8px;background:rgba(0,0,0,.3);border-radius:6px;color:#888;border:1px solid rgba(255,255,255,.1)}
-.indicator-item.bullish{background:rgba(0,255,136,.15);color:#00ff88;border-color:rgba(0,255,136,.3);text-shadow:0 0 5px #00ff88}
-.indicator-item.bearish{background:rgba(255,0,128,.15);color:#ff0080;border-color:rgba(255,0,128,.3);text-shadow:0 0 5px #ff0080}
-.indicator-item.neutral{background:rgba(255,255,0,.15);color:#ffff00;border-color:rgba(255,255,0,.3);text-shadow:0 0 5px #ffff00}
-.config-section-title{font-size:10px;color:#00ffff;margin:12px 0 8px;padding-bottom:4px;border-bottom:1px solid rgba(0,255,255,.2);text-transform:uppercase;letter-spacing:1px}
+.btn-main{width:100%;padding:12px;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;text-transform:uppercase;letter-spacing:1px;transition:all .2s}
+.btn-start{background:linear-gradient(135deg,#00ffff 0%,#00ff88 100%);color:#000;box-shadow:0 0 15px rgba(0,255,255,.4)}
+.btn-start:hover{background:linear-gradient(135deg,#00ff88 0%,#00ffff 100%);transform:translateY(-1px);box-shadow:0 0 25px rgba(0,255,255,.6)}
+.btn-stop{background:linear-gradient(135deg,#ff0080 0%,#ff00ff 100%);color:#fff;box-shadow:0 0 15px rgba(255,0,128,.4)}
+.btn-stop:hover{background:linear-gradient(135deg,#ff00ff 0%,#ff0080 100%);box-shadow:0 0 25px rgba(255,0,128,.6)}
+.indicator-item{font-size:8px;padding:2px 4px;background:rgba(0,0,0,.3);border-radius:4px;color:#888;border:1px solid rgba(255,255,255,.1)}
+.indicator-item.bullish{background:rgba(0,255,136,.15);color:#00ff88;border-color:rgba(0,255,136,.3)}
+.indicator-item.bearish{background:rgba(255,0,128,.15);color:#ff0080;border-color:rgba(255,0,128,.3)}
+.indicator-item.neutral{background:rgba(255,255,0,.15);color:#ffff00;border-color:rgba(255,255,0,.3)}
+.config-section-title{font-size:9px;color:#00ffff;margin:10px 0 6px;padding-bottom:3px;border-bottom:1px solid rgba(0,255,255,.2);text-transform:uppercase;letter-spacing:1px}
+.stop-group{margin-left:15px;padding:6px;background:rgba(0,0,0,.2);border-radius:6px;margin-bottom:6px}
+.stop-group.disabled-group{opacity:.4;pointer-events:none}
 </style>
 
 <div class="hud-header" id="worbit-header">
@@ -2510,29 +2433,26 @@ function initSystem() {
   </div>
 
   <div class="info-grid">
-    <div class="stat-box"><div class="stat-label">ACTIVO</div><div class="stat-val" id="ui-active" style="color:#00ffff;font-size:10px;text-shadow:0 0 5px #00ffff">--</div></div>
-    <div class="stat-box" id="mg-box" style="display:none"><div class="stat-label">NIVEL MG</div><div class="stat-val" id="ui-mg" style="color:#ff00ff;text-shadow:0 0 5px #ff00ff">0</div></div>
+    <div class="stat-box"><div class="stat-label">ACTIVO</div><div class="stat-val" id="ui-active" style="color:#00ffff;font-size:9px;text-shadow:0 0 5px #00ffff">--</div></div>
+    <div class="stat-box"><div class="stat-label">EMA</div><div class="stat-val" id="ind-ema" style="color:#00ff88">--</div></div>
+    <div class="stat-box"><div class="stat-label">ATR</div><div class="stat-val" id="ind-atr" style="color:#ff00ff">--</div></div>
+    <div class="stat-box"><div class="stat-label">TREND</div><div class="stat-val" id="ind-trend" style="color:#ffff00">--</div></div>
   </div>
-
-  <!-- V12: Indicador de Warmup del Sistema -->
-  <div class="warmup-section" id="warmup-section">
-    <div class="warmup-header">
-      <span class="warmup-icon" id="warmup-icon">🔄</span>
-      <span class="warmup-text" id="warmup-text">Sistema cargando...</span>
-      <span class="warmup-pct" id="warmup-pct">0%</span>
-    </div>
-    <div class="warmup-bar-bg">
-      <div class="warmup-bar-fill" id="warmup-bar-fill" style="width:0%"></div>
-    </div>
-    <div class="warmup-indicators" id="warmup-indicators">
-      <span class="indicator-item" id="ind-ema">EMA: --</span>
-      <span class="indicator-item" id="ind-atr">ATR: --</span>
-      <span class="indicator-item" id="ind-trend">TREND: --</span>
-    </div>
+  <div class="info-grid" id="mg-row" style="display:none;grid-template-columns:1fr">
+    <div class="stat-box" id="mg-box"><div class="stat-label">NIVEL MG</div><div class="stat-val" id="ui-mg" style="color:#ff00ff;text-shadow:0 0 5px #ff00ff">0</div></div>
   </div>
 
   <div id="signal-box">
-    <div class="signal-status" style="font-size:11px;color:#00ffff">INICIAR PARA ANALIZAR</div>
+    <div class="warmup-bar-container" id="warmup-container" style="display:none;margin-bottom:8px">
+      <div class="warmup-header" style="display:flex;justify-content:space-between;font-size:9px;margin-bottom:3px">
+        <span id="warmup-text" style="color:#888">Cargando...</span>
+        <span id="warmup-pct" style="color:#00ffff">0%</span>
+      </div>
+      <div class="warmup-bar-bg" style="height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden">
+        <div id="warmup-bar-fill" style="width:0%;height:100%;background:linear-gradient(90deg,#00ffff,#00ff88);border-radius:2px;transition:width .3s"></div>
+      </div>
+    </div>
+    <div class="signal-status" id="signal-status" style="font-size:11px;color:#00ffff">INICIAR PARA ANALIZAR</div>
   </div>
 
   <div class="monitor-container">
@@ -2605,12 +2525,14 @@ function initSystem() {
       stopLoss: $('stop-loss'),
       maxWins: $('max-wins'),
       maxLosses: $('max-losses'),
-      // V12: Elementos de warmup
-      warmupSection: $('warmup-section'),
-      warmupIcon: $('warmup-icon'),
+      // V12: Elementos de warmup (ahora dentro del signal-box)
+      warmupContainer: $('warmup-container'),
       warmupText: $('warmup-text'),
       warmupPct: $('warmup-pct'),
       warmupBarFill: $('warmup-bar-fill'),
+      signalStatus: $('signal-status'),
+      mgRow: $('mg-row'),
+      // Indicadores en info-grid
       indEma: $('ind-ema'),
       indAtr: $('ind-atr'),
       indTrend: $('ind-trend')
@@ -2642,7 +2564,7 @@ function initSystem() {
     if (DOM.swMg) DOM.swMg.onclick = function() {
       config.useMartingale = !config.useMartingale;
       this.classList.toggle('active', config.useMartingale);
-      DOM.mgBox.style.display = config.useMartingale ? 'block' : 'none';
+      if (DOM.mgRow) DOM.mgRow.style.display = config.useMartingale ? 'grid' : 'none';
       logMonitor(`Martingala: ${config.useMartingale ? 'ON' : 'OFF'}`);
       if (!config.useMartingale) mgLevel = 0;
       saveConfigToStorage();
