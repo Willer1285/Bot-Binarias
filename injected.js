@@ -759,31 +759,34 @@ window.addEventListener('message', (event) => {
 
 function applyConfigToUI() {
   if (!DOM.swAuto) return;
-  
+
+  // Switches principales
   DOM.swAuto.classList.toggle('active', config.autoTrade);
   DOM.swMg.classList.toggle('active', config.useMartingale);
   DOM.swInv.classList.toggle('active', config.invertTrade);
+  if (DOM.swConfirm) DOM.swConfirm.classList.toggle('active', config.useConfirmation);
+  if (DOM.swNext) DOM.swNext.classList.toggle('active', config.operateOnNext);
   if (DOM.swChart) DOM.swChart.classList.toggle('active', config.useChartData);
+
+  // Inputs numéricos
   if (DOM.riskPct) DOM.riskPct.value = config.riskPct;
   if (DOM.mgSteps) DOM.mgSteps.value = config.mgMaxSteps;
   if (DOM.mgFactor) DOM.mgFactor.value = config.mgFactor;
   if (DOM.entrySec) DOM.entrySec.value = config.entrySec;
   if (DOM.timerDelay) DOM.timerDelay.value = config.timeOffset;
-  if (DOM.chkConfirm) DOM.chkConfirm.checked = config.useConfirmation;
-  if (DOM.chkNext) DOM.chkNext.checked = config.operateOnNext;
   if (DOM.mgBox) DOM.mgBox.style.display = config.useMartingale ? 'block' : 'none';
-  
+
   // Stop Config
   if (config.stopConfig) {
-    if (DOM.chkTime) DOM.chkTime.checked = config.stopConfig.useTime;
-    if (DOM.chkRisk) DOM.chkRisk.checked = config.stopConfig.useRisk;
-    if (DOM.chkTrades) DOM.chkTrades.checked = config.stopConfig.useTrades;
-    if (DOM.sessionTime) DOM.sessionTime.value = config.stopConfig.timeMin;
-    if (DOM.profitTarget) DOM.profitTarget.value = config.stopConfig.profitPct;
-    if (DOM.stopLoss) DOM.stopLoss.value = config.stopConfig.stopLossPct;
-    if (DOM.maxWins) DOM.maxWins.value = config.stopConfig.maxWins;
-    if (DOM.maxLosses) DOM.maxLosses.value = config.stopConfig.maxLosses;
-    
+    if (DOM.swTime) DOM.swTime.classList.toggle('active', config.stopConfig.useTime);
+    if (DOM.swRisk) DOM.swRisk.classList.toggle('active', config.stopConfig.useRisk);
+    if (DOM.swTrades) DOM.swTrades.classList.toggle('active', config.stopConfig.useTrades);
+    if (DOM.sessionTime) DOM.sessionTime.value = config.stopConfig.timeMin || 60;
+    if (DOM.profitTarget) DOM.profitTarget.value = config.stopConfig.profitPct || 10;
+    if (DOM.stopLoss) DOM.stopLoss.value = config.stopConfig.stopLossPct || 10;
+    if (DOM.maxWins) DOM.maxWins.value = config.stopConfig.maxWins || 5;
+    if (DOM.maxLosses) DOM.maxLosses.value = config.stopConfig.maxLosses || 3;
+
     if (DOM.grpTime) DOM.grpTime.classList.toggle('disabled-group', !config.stopConfig.useTime);
     if (DOM.grpRisk) DOM.grpRisk.classList.toggle('disabled-group', !config.stopConfig.useRisk);
     if (DOM.grpTrades) DOM.grpTrades.classList.toggle('disabled-group', !config.stopConfig.useTrades);
@@ -1230,11 +1233,8 @@ function onTick(data) {
   }
   if (DOM.uiActive) DOM.uiActive.textContent = data.pair;
   
-  // MEJORADO: Mostrar fuente de datos actual
-  if (DOM.uiSource) {
-    DOM.uiSource.textContent = chartAccessMethod.toUpperCase();
-    DOM.uiSource.style.color = chartAccessMethod === 'tradingview' || chartAccessMethod === 'api' ? '#00e676' : '#f1c40f';
-  }
+  // Actualizar warmup UI
+  updateWarmupUI();
   
   // Cambio de activo
   if (currentPair !== data.pair) {
@@ -1245,7 +1245,8 @@ function onTick(data) {
     pendingTrades = [];
     processed = 0;
     chartAccessMethod = 'none';
-    if (DOM.uiCnt) DOM.uiCnt.textContent = `0/${TARGET_CANDLES}`;
+    // Contador de velas removido - usar warmup indicator
+// if (DOM.uiCnt) DOM.uiCnt.textContent = `0/${TARGET_CANDLES}`;
     logMonitor(`Activo: ${currentPair}`, 'info');
     
     // Cargar histórico para el nuevo activo
@@ -1254,7 +1255,8 @@ function onTick(data) {
         candles = hist;
         chartCandles = hist.slice(); // Copiar también a chartCandles
         processed = hist.length;
-        if (DOM.uiCnt) DOM.uiCnt.textContent = `${Math.min(processed, TARGET_CANDLES)}/${TARGET_CANDLES}`;
+        // Contador de velas removido - usar warmup indicator
+// if (DOM.uiCnt) DOM.uiCnt.textContent = `${Math.min(processed, TARGET_CANDLES)}/${TARGET_CANDLES}`;
       }
     });
   }
@@ -1273,7 +1275,8 @@ function onTick(data) {
     if (candles.length > MAX_CANDLES) candles.shift();
     
     processed++;
-    if (DOM.uiCnt) DOM.uiCnt.textContent = `${Math.min(processed, TARGET_CANDLES)}/${TARGET_CANDLES}`;
+    // Contador de velas removido - usar warmup indicator
+// if (DOM.uiCnt) DOM.uiCnt.textContent = `${Math.min(processed, TARGET_CANDLES)}/${TARGET_CANDLES}`;
     
     checkTradeResults(currentCandle);
     
@@ -1327,36 +1330,52 @@ function onTick(data) {
   updateSignalUI(sec, currentCandle.s);
 }
 
-// ============= UI DE SEÑALES =============
+// ============= UI DE SEÑALES (CYBERPUNK STYLE) =============
 function updateSignalUI(sec, key) {
   if (!DOM.signalBox) return;
-  
-  if (tradeExecutedThisCandle) {
-    DOM.signalBox.className = lastTradeType === 'call' ? 'sig-possible-call' : 'sig-possible-put';
+
+  // V12: No mostrar señales si el sistema no está listo
+  if (!isSystemWarmedUp) {
+    DOM.signalBox.className = 'sig-waiting';
     DOM.signalBox.innerHTML = `
-      <div style="font-size:14px;font-weight:700">${lastTradeType === 'call' ? '▲ COMPRA' : '▼ VENTA'}</div>
-      <div style="font-size:10px;margin-top:4px">ESPERANDO RESULTADO...</div>`;
+      <div class="signal-icon">⏳</div>
+      <div class="signal-title" style="color:#ff00ff;font-size:14px">CARGANDO SISTEMA</div>
+      <div class="signal-subtitle" style="color:#00ffff">${systemWarmupLevel}% - Esperando ${TARGET_CANDLES_FULL} velas</div>`;
     return;
   }
-  
+
+  if (tradeExecutedThisCandle) {
+    const isCall = lastTradeType === 'call';
+    DOM.signalBox.className = isCall ? 'sig-possible-call' : 'sig-possible-put';
+    DOM.signalBox.innerHTML = `
+      <div class="signal-icon">${isCall ? '📈' : '📉'}</div>
+      <div class="signal-title" style="color:${isCall ? '#00ff88' : '#ff0080'}">${isCall ? '▲ COMPRA' : '▼ VENTA'}</div>
+      <div class="signal-subtitle">⏳ ESPERANDO RESULTADO...</div>`;
+    return;
+  }
+
   if (pendingSignal) {
     let type = pendingSignal.d;
+    const score = pendingSignal.score || 0;
     if (config.invertTrade) type = type === 'call' ? 'put' : 'call';
-    
+
+    const isCall = type === 'call';
     const triggerSec = 60 - config.entrySec;
-    const windowSize = config.entryWindowSec || 3; // Ventana de entrada configurable
+    const windowSize = config.entryWindowSec || 3;
+
     if (sec <= triggerSec && sec > (triggerSec - windowSize)) {
-      DOM.signalBox.className = type === 'call' ? 'sig-entry-call' : 'sig-entry-put';
+      DOM.signalBox.className = isCall ? 'sig-entry-call' : 'sig-entry-put';
       DOM.signalBox.innerHTML = `
-        <div style="font-size:16px;font-weight:800">${type === 'call' ? '▲ COMPRA' : '▼ VENTA'}</div>
-        <div class="entry-countdown">¡ENTRAR AHORA!</div>`;
-      
+        <div class="signal-icon">${isCall ? '🚀' : '💥'}</div>
+        <div class="signal-title" style="color:${isCall ? '#00ff88' : '#ff0080'}">${isCall ? '▲▲ COMPRA ▲▲' : '▼▼ VENTA ▼▼'}</div>
+        <div class="entry-countdown" style="color:${isCall ? '#00ff88' : '#ff0080'}">¡¡ ENTRAR AHORA !!</div>
+        <div style="font-size:10px;margin-top:6px;color:#fff">Score: ${score}/10 | ${currentTrend.toUpperCase()}</div>`;
+
       if (!tradeExecutedThisCandle) {
         tradeExecutedThisCandle = true;
         lastTradeType = type;
         const tKey = key + 60000;
         if (!pendingTrades.some(t => t.k === tKey)) {
-          // V12: Guardar precio de entrada real para verificación precisa
           const entryPrice = getCurrentPrice();
           pendingTrades.push({ k: tKey, type: type, entryPrice: entryPrice });
           if (config.autoTrade) executeTrade(type);
@@ -1366,12 +1385,19 @@ function updateSignalUI(sec, key) {
     } else {
       DOM.signalBox.className = 'sig-anticipation';
       DOM.signalBox.innerHTML = `
-        <div class="anticipation-badge">PREPARAR ${type === 'call' ? '▲' : '▼'}</div>
-        <div style="font-size:11px;margin-top:6px">Entrada en ${sec}s</div>`;
+        <div class="signal-icon">${isCall ? '⬆️' : '⬇️'}</div>
+        <div class="anticipation-badge" style="color:${isCall ? '#00ff88' : '#ff0080'}">
+          PREPARAR ${isCall ? '▲ CALL' : '▼ PUT'}
+        </div>
+        <div style="font-size:12px;margin-top:8px;color:#fff">Entrada en <span style="color:#ffff00;font-weight:700">${sec}s</span></div>
+        <div style="font-size:10px;margin-top:4px;color:#aaa">Score: ${score}/10</div>`;
     }
   } else {
     DOM.signalBox.className = 'sig-waiting';
-    DOM.signalBox.innerHTML = '<div style="font-size:11px;color:#888">ANALIZANDO MERCADO...</div>';
+    DOM.signalBox.innerHTML = `
+      <div class="signal-icon">🔍</div>
+      <div class="signal-title" style="color:#00ffff;font-size:12px">ANALIZANDO MERCADO</div>
+      <div class="signal-subtitle" style="color:#888">Buscando oportunidades...</div>`;
   }
 }
 
@@ -1862,13 +1888,81 @@ function readAccount() {
       } catch (e) {}
     }
     
+    // ============= MÉTODO 4: BÚSQUEDA AGRESIVA EN DOM =============
+    if (!foundBalance) {
+      try {
+        // Buscar cualquier elemento que contenga un valor monetario cerca del header
+        const headerArea = document.querySelector('header') || document.querySelector('[class*="header"]');
+        if (headerArea) {
+          const allElements = headerArea.querySelectorAll('*');
+          for (const el of allElements) {
+            if (el.children.length === 0) { // Solo elementos de texto
+              const text = el.textContent.trim();
+              // Buscar patrones como $1,234.56 o 1234.56 o $1234
+              const moneyMatch = text.match(/\$?\s*([\d,]+\.?\d*)/);
+              if (moneyMatch) {
+                let value = moneyMatch[1].replace(/,/g, '');
+                const parsed = parseFloat(value);
+                if (!isNaN(parsed) && parsed > 0 && parsed < 1000000) {
+                  balance = parsed;
+                  foundBalance = true;
+                  logMonitor(`✓ Saldo desde header: $${balance.toFixed(2)}`, 'success');
+                  break;
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {}
+    }
+
+    // ============= MÉTODO 5: BUSCAR EN SELECTORES COMUNES DE WORBIT =============
+    if (!foundBalance) {
+      try {
+        const commonSelectors = [
+          '[data-testid*="balance"]',
+          '[class*="wallet"] [class*="value"]',
+          '[class*="account"] [class*="amount"]',
+          '[class*="money"]',
+          '[class*="currency"]'
+        ];
+
+        for (const selector of commonSelectors) {
+          const elements = document.querySelectorAll(selector);
+          for (const el of elements) {
+            const text = el.textContent.trim();
+            const moneyMatch = text.match(/([\d,]+\.?\d*)/);
+            if (moneyMatch) {
+              let value = moneyMatch[1].replace(/,/g, '');
+              const parsed = parseFloat(value);
+              if (!isNaN(parsed) && parsed > 0 && parsed < 1000000) {
+                balance = parsed;
+                foundBalance = true;
+                logMonitor(`✓ Saldo desde ${selector}: $${balance.toFixed(2)}`, 'success');
+                break;
+              }
+            }
+          }
+          if (foundBalance) break;
+        }
+      } catch (e) {}
+    }
+
+    // Si aún no hay balance, usar valor por defecto y mostrar advertencia
+    if (!foundBalance) {
+      logMonitor('⚠ No se detectó saldo automáticamente', 'pattern');
+      logMonitor('ℹ Verifica que la página esté completamente cargada', 'info');
+    }
+
     // ============= ACTUALIZAR UI =============
     if (DOM.accType) {
       DOM.accType.textContent = isDemo ? 'DEMO' : 'REAL';
+      DOM.accType.style.background = isDemo ? 'rgba(241,196,15,.2)' : 'rgba(231,76,60,.2)';
       DOM.accType.style.color = isDemo ? '#f1c40f' : '#e74c3c';
     }
     if (DOM.accBal) {
       DOM.accBal.textContent = `$${balance.toFixed(2)}`;
+      DOM.accBal.style.color = balance > 0 ? '#fff' : '#ff0080';
     }
     
     // Log de estado final si hay problemas
@@ -1983,7 +2077,8 @@ function startBot() {
         candles = hist;
         chartCandles = hist.slice();
         processed = hist.length;
-        if (DOM.uiCnt) DOM.uiCnt.textContent = `${Math.min(processed, TARGET_CANDLES)}/${TARGET_CANDLES}`;
+        // Contador de velas removido - usar warmup indicator
+// if (DOM.uiCnt) DOM.uiCnt.textContent = `${Math.min(processed, TARGET_CANDLES)}/${TARGET_CANDLES}`;
       }
     });
   }
@@ -2184,101 +2279,111 @@ function initSystem() {
       hud.id = 'worbit-hud';
       hud.innerHTML = `
 <style>
-#worbit-hud{position:fixed;top:20px;right:20px;width:320px;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);border-radius:16px;box-shadow:0 10px 40px rgba(0,0,0,.6);z-index:999999;font-family:'Segoe UI',system-ui,sans-serif;display:none;border:1px solid rgba(255,255,255,.1);overflow:hidden}
-#worbit-hud.visible{display:block}
-.hud-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:linear-gradient(90deg,#0f3460 0%,#16213e 100%);border-bottom:1px solid rgba(255,255,255,.1);cursor:grab}
+#worbit-hud{position:fixed;top:20px;right:20px;width:320px;max-height:90vh;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);border-radius:16px;box-shadow:0 0 20px rgba(0,255,255,.4),0 0 40px rgba(0,255,255,.2),0 10px 40px rgba(0,0,0,.6);z-index:999999;font-family:'Segoe UI',system-ui,sans-serif;display:none;border:1px solid rgba(0,255,255,.3);overflow:hidden;animation:hud-glow 3s ease-in-out infinite}
+#worbit-hud.visible{display:flex;flex-direction:column}
+@keyframes hud-glow{0%,100%{box-shadow:0 0 20px rgba(0,255,255,.4),0 0 40px rgba(0,255,255,.2),0 10px 40px rgba(0,0,0,.6)}50%{box-shadow:0 0 30px rgba(0,255,255,.6),0 0 60px rgba(0,255,255,.3),0 10px 40px rgba(0,0,0,.6)}}
+.hud-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:linear-gradient(90deg,#0f3460 0%,#16213e 100%);border-bottom:1px solid rgba(0,255,255,.2);cursor:grab;flex-shrink:0}
 .hud-title{display:flex;align-items:center;gap:10px;font-weight:700;font-size:14px;color:#fff;text-transform:uppercase;letter-spacing:1px}
-.hud-version{font-size:10px;color:#00e676;font-weight:400}
+.hud-version{font-size:10px;color:#00ffff;font-weight:400;text-shadow:0 0 10px #00ffff}
 .dot{width:10px;height:10px;border-radius:50%;background:#e74c3c;box-shadow:0 0 8px #e74c3c;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 .close-btn{background:none;border:none;color:#888;cursor:pointer;font-size:18px;padding:4px 8px;border-radius:4px}
 .close-btn:hover{background:rgba(255,255,255,.1);color:#fff}
-.hud-body{padding:12px 16px}
+.hud-body{padding:12px 16px;overflow-y:auto;flex:1}
 .account-info{display:flex;gap:10px;margin-bottom:12px;align-items:center}
 .acc-badge{padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;background:rgba(241,196,15,.2);color:#f1c40f}
 .acc-balance{font-size:16px;font-weight:700;color:#fff}
 .live-price{font-size:11px;padding:3px 8px;border-radius:4px;margin-left:auto}
 .price-up{background:rgba(0,230,118,.2);color:#00e676}
 .price-down{background:rgba(231,76,60,.2);color:#e74c3c}
-.controls-row{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
-.switch-box{display:flex;align-items:center;gap:6px;background:rgba(255,255,255,.05);padding:6px 10px;border-radius:8px;cursor:pointer;transition:all .2s;flex:1;min-width:70px}
-.switch-box:hover{background:rgba(255,255,255,.1)}
-.switch-box.active{background:rgba(0,230,118,.2);border:1px solid rgba(0,230,118,.3)}
-.switch-label{font-size:10px;color:#aaa;text-transform:uppercase}
-.switch-box.active .switch-label{color:#00e676}
-.section-header{display:flex;align-items:center;justify-content:space-between;padding:8px 0;cursor:pointer;border-top:1px solid rgba(255,255,255,.05);margin-top:8px}
-.section-title{font-size:11px;color:#888;text-transform:uppercase;letter-spacing:1px}
-.section-toggle{color:#666;font-size:10px;transition:transform .2s}
-.section-toggle.open{transform:rotate(180deg)}
-.config-panel{display:none;padding:10px 0}
-.config-panel.visible{display:block}
-.config-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}
-.config-label{font-size:11px;color:#aaa;flex:1}
-.config-input{width:60px;padding:6px 8px;border:1px solid rgba(255,255,255,.1);border-radius:6px;background:rgba(0,0,0,.3);color:#fff;font-size:12px;text-align:center}
-.config-input:focus{outline:none;border-color:#00e676}
-.checkbox-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}
-.checkbox-row input{width:14px;height:14px;accent-color:#00e676}
-.checkbox-row label{font-size:11px;color:#aaa}
-.stop-group{margin-left:20px;padding:8px;background:rgba(0,0,0,.2);border-radius:8px;margin-bottom:8px}
-.stop-group.disabled-group{opacity:.4;pointer-events:none}
 .stats-row{display:flex;gap:10px;margin-bottom:12px}
 .stat-item{flex:1;text-align:center;background:rgba(255,255,255,.05);padding:8px;border-radius:8px}
 .stat-val{font-size:18px;font-weight:700;color:#fff}
 .stat-label{font-size:9px;color:#666;text-transform:uppercase;margin-top:2px}
 .stat-val.win{color:#00e676}
 .stat-val.loss{color:#e74c3c}
+.section-header{display:flex;align-items:center;justify-content:space-between;padding:8px 0;cursor:pointer;border-top:1px solid rgba(255,255,255,.05);margin-top:8px}
+.section-title{font-size:11px;color:#888;text-transform:uppercase;letter-spacing:1px}
+.section-toggle{color:#666;font-size:10px;transition:transform .2s}
+.section-toggle.open{transform:rotate(180deg)}
+.config-panel{display:none;padding:10px 0;max-height:300px;overflow-y:auto}
+.config-panel.visible{display:block}
+.config-panel::-webkit-scrollbar{width:4px}
+.config-panel::-webkit-scrollbar-track{background:rgba(255,255,255,.05);border-radius:2px}
+.config-panel::-webkit-scrollbar-thumb{background:rgba(0,255,255,.3);border-radius:2px}
+.config-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.config-label{font-size:11px;color:#aaa;flex:1}
+.config-input{width:60px;padding:6px 8px;border:1px solid rgba(255,255,255,.1);border-radius:6px;background:rgba(0,0,0,.3);color:#fff;font-size:12px;text-align:center}
+.config-input:focus{outline:none;border-color:#00ffff}
+.switch-box{display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,.05);padding:8px 12px;border-radius:8px;cursor:pointer;transition:all .2s;margin-bottom:6px}
+.switch-box:hover{background:rgba(255,255,255,.1)}
+.switch-box.active{background:rgba(0,255,255,.15);border:1px solid rgba(0,255,255,.3)}
+.switch-box.active .switch-label{color:#00ffff}
+.switch-label{font-size:11px;color:#aaa}
+.switch-toggle{width:36px;height:20px;background:rgba(255,255,255,.1);border-radius:10px;position:relative;transition:all .2s}
+.switch-toggle::after{content:'';position:absolute;width:16px;height:16px;background:#666;border-radius:50%;top:2px;left:2px;transition:all .2s}
+.switch-box.active .switch-toggle{background:rgba(0,255,255,.3)}
+.switch-box.active .switch-toggle::after{left:18px;background:#00ffff;box-shadow:0 0 8px #00ffff}
 .timer-section{background:rgba(0,0,0,.2);border-radius:10px;padding:10px;margin-bottom:12px}
 .timer-header{display:flex;justify-content:space-between;margin-bottom:6px;font-size:11px;color:#aaa}
-.session-timer{color:#00e676}
+.session-timer{color:#00ffff;text-shadow:0 0 5px #00ffff}
 #timer-bar-bg{height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden}
-#timer-bar-fill{height:100%;width:0;background:#00e676;transition:width .3s,background .3s}
+#timer-bar-fill{height:100%;width:0;background:#00ffff;transition:width .3s,background .3s;box-shadow:0 0 10px #00ffff}
 .info-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
 .stat-box{background:rgba(255,255,255,.05);padding:8px;border-radius:8px;text-align:center}
 .stat-box .stat-label{font-size:9px;color:#666;text-transform:uppercase;margin-bottom:2px}
 .stat-box .stat-val{font-size:13px;font-weight:600;color:#fff}
-#signal-box{padding:16px;border-radius:12px;text-align:center;margin-bottom:12px;background:rgba(255,255,255,.03);transition:all .3s}
-.sig-waiting{border:1px dashed rgba(255,255,255,.1)}
-.sig-anticipation{background:linear-gradient(135deg,rgba(52,152,219,.2) 0%,rgba(52,152,219,.1) 100%);border:1px solid rgba(52,152,219,.3)}
-.sig-possible-call{background:linear-gradient(135deg,rgba(0,230,118,.15) 0%,rgba(0,230,118,.05) 100%);border:1px solid rgba(0,230,118,.3)}
-.sig-possible-put{background:linear-gradient(135deg,rgba(231,76,60,.15) 0%,rgba(231,76,60,.05) 100%);border:1px solid rgba(231,76,60,.3)}
-.sig-entry-call{background:linear-gradient(135deg,rgba(0,230,118,.3) 0%,rgba(0,230,118,.1) 100%);border:2px solid #00e676;animation:glow-green 1s infinite}
-.sig-entry-put{background:linear-gradient(135deg,rgba(231,76,60,.3) 0%,rgba(231,76,60,.1) 100%);border:2px solid #e74c3c;animation:glow-red 1s infinite}
-@keyframes glow-green{0%,100%{box-shadow:0 0 10px rgba(0,230,118,.3)}50%{box-shadow:0 0 20px rgba(0,230,118,.5)}}
-@keyframes glow-red{0%,100%{box-shadow:0 0 10px rgba(231,76,60,.3)}50%{box-shadow:0 0 20px rgba(231,76,60,.5)}}
-.anticipation-badge{display:inline-block;padding:6px 16px;background:rgba(52,152,219,.3);border-radius:20px;font-size:13px;font-weight:700;color:#3498db}
-.entry-countdown{margin-top:8px;font-size:12px;font-weight:600;color:#fff;animation:blink .5s infinite}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:.5}}
+#signal-box{padding:20px;border-radius:12px;text-align:center;margin-bottom:12px;background:linear-gradient(135deg,rgba(0,0,0,.4) 0%,rgba(0,0,0,.2) 100%);transition:all .3s;border:2px solid transparent}
+.sig-waiting{border:2px dashed rgba(0,255,255,.3);background:linear-gradient(135deg,rgba(0,20,40,.6) 0%,rgba(0,10,30,.4) 100%)}
+.sig-waiting .signal-status{color:#00ffff;text-shadow:0 0 10px rgba(0,255,255,.5)}
+.sig-anticipation{background:linear-gradient(135deg,rgba(255,0,255,.2) 0%,rgba(0,255,255,.1) 100%);border:2px solid rgba(255,0,255,.5);box-shadow:0 0 20px rgba(255,0,255,.3),inset 0 0 30px rgba(255,0,255,.1)}
+.sig-possible-call{background:linear-gradient(135deg,rgba(0,255,136,.25) 0%,rgba(0,255,255,.15) 100%);border:2px solid #00ff88;box-shadow:0 0 25px rgba(0,255,136,.4),inset 0 0 30px rgba(0,255,136,.1);animation:neon-call 1.5s ease-in-out infinite}
+.sig-possible-put{background:linear-gradient(135deg,rgba(255,0,128,.25) 0%,rgba(255,0,255,.15) 100%);border:2px solid #ff0080;box-shadow:0 0 25px rgba(255,0,128,.4),inset 0 0 30px rgba(255,0,128,.1);animation:neon-put 1.5s ease-in-out infinite}
+.sig-entry-call{background:linear-gradient(135deg,rgba(0,255,136,.4) 0%,rgba(0,255,255,.2) 100%);border:3px solid #00ff88;box-shadow:0 0 40px rgba(0,255,136,.6),0 0 80px rgba(0,255,136,.3),inset 0 0 40px rgba(0,255,136,.2);animation:neon-entry-call .5s ease-in-out infinite}
+.sig-entry-put{background:linear-gradient(135deg,rgba(255,0,128,.4) 0%,rgba(255,0,255,.2) 100%);border:3px solid #ff0080;box-shadow:0 0 40px rgba(255,0,128,.6),0 0 80px rgba(255,0,128,.3),inset 0 0 40px rgba(255,0,128,.2);animation:neon-entry-put .5s ease-in-out infinite}
+@keyframes neon-call{0%,100%{box-shadow:0 0 25px rgba(0,255,136,.4),inset 0 0 30px rgba(0,255,136,.1)}50%{box-shadow:0 0 35px rgba(0,255,136,.6),inset 0 0 40px rgba(0,255,136,.2)}}
+@keyframes neon-put{0%,100%{box-shadow:0 0 25px rgba(255,0,128,.4),inset 0 0 30px rgba(255,0,128,.1)}50%{box-shadow:0 0 35px rgba(255,0,128,.6),inset 0 0 40px rgba(255,0,128,.2)}}
+@keyframes neon-entry-call{0%,100%{box-shadow:0 0 40px rgba(0,255,136,.6),0 0 80px rgba(0,255,136,.3)}50%{box-shadow:0 0 60px rgba(0,255,136,.8),0 0 100px rgba(0,255,136,.5)}}
+@keyframes neon-entry-put{0%,100%{box-shadow:0 0 40px rgba(255,0,128,.6),0 0 80px rgba(255,0,128,.3)}50%{box-shadow:0 0 60px rgba(255,0,128,.8),0 0 100px rgba(255,0,128,.5)}}
+.signal-title{font-size:20px;font-weight:800;text-transform:uppercase;letter-spacing:2px;margin-bottom:6px;text-shadow:0 0 20px currentColor}
+.signal-subtitle{font-size:11px;opacity:.8}
+.signal-icon{font-size:32px;margin-bottom:8px;filter:drop-shadow(0 0 10px currentColor)}
+.anticipation-badge{display:inline-block;padding:8px 20px;background:linear-gradient(135deg,rgba(255,0,255,.4) 0%,rgba(0,255,255,.3) 100%);border-radius:25px;font-size:14px;font-weight:700;color:#fff;text-shadow:0 0 10px #ff00ff;border:1px solid rgba(255,0,255,.5);animation:badge-pulse 1s ease-in-out infinite}
+@keyframes badge-pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
+.entry-countdown{margin-top:10px;font-size:14px;font-weight:700;color:#fff;animation:blink .3s infinite;text-shadow:0 0 15px currentColor}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
 .monitor-container{margin-bottom:12px}
 #monitor-box{max-height:0;overflow:hidden;transition:max-height .3s;background:rgba(0,0,0,.3);border-radius:8px}
 #monitor-box.visible{max-height:150px;overflow-y:auto;padding:8px}
 .monitor-line{font-size:10px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.03);display:flex;gap:8px}
 .monitor-time{color:#666;font-family:monospace}
 .monitor-info{color:#aaa}
-.monitor-success{color:#00e676}
-.monitor-blocked{color:#e74c3c}
-.monitor-pattern{color:#f1c40f}
+.monitor-success{color:#00ff88;text-shadow:0 0 5px #00ff88}
+.monitor-blocked{color:#ff0080;text-shadow:0 0 5px #ff0080}
+.monitor-pattern{color:#ffff00;text-shadow:0 0 5px #ffff00}
 .btn-main{width:100%;padding:14px;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;text-transform:uppercase;letter-spacing:1px;transition:all .2s}
-.btn-start{background:linear-gradient(135deg,#00e676 0%,#00c853 100%);color:#000}
-.btn-start:hover{background:linear-gradient(135deg,#00c853 0%,#00a843 100%);transform:translateY(-1px)}
-.btn-stop{background:linear-gradient(135deg,#e74c3c 0%,#c0392b 100%);color:#fff}
-.btn-stop:hover{background:linear-gradient(135deg,#c0392b 0%,#a93226 100%)}
-.source-badge{font-size:9px;padding:2px 6px;border-radius:4px;background:rgba(0,230,118,.2);color:#00e676;margin-left:auto}
-.warmup-section{margin:10px 0;padding:10px;background:rgba(0,0,0,.3);border-radius:10px;border:1px solid rgba(255,255,255,.05)}
-.warmup-section.ready{border-color:rgba(0,230,118,.3);background:rgba(0,230,118,.05)}
-.warmup-header{display:flex;align-items:center;gap:8px;margin-bottom:8px}
-.warmup-icon{font-size:14px}
+.btn-start{background:linear-gradient(135deg,#00ffff 0%,#00ff88 100%);color:#000;box-shadow:0 0 20px rgba(0,255,255,.4)}
+.btn-start:hover{background:linear-gradient(135deg,#00ff88 0%,#00ffff 100%);transform:translateY(-1px);box-shadow:0 0 30px rgba(0,255,255,.6)}
+.btn-stop{background:linear-gradient(135deg,#ff0080 0%,#ff00ff 100%);color:#fff;box-shadow:0 0 20px rgba(255,0,128,.4)}
+.btn-stop:hover{background:linear-gradient(135deg,#ff00ff 0%,#ff0080 100%);box-shadow:0 0 30px rgba(255,0,128,.6)}
+.source-badge{font-size:9px;padding:2px 6px;border-radius:4px;background:rgba(0,255,255,.2);color:#00ffff;margin-left:auto}
+.warmup-section{margin:10px 0;padding:12px;background:linear-gradient(135deg,rgba(0,0,0,.4) 0%,rgba(0,20,40,.3) 100%);border-radius:12px;border:1px solid rgba(0,255,255,.2)}
+.warmup-section.ready{border-color:rgba(0,255,136,.5);background:linear-gradient(135deg,rgba(0,255,136,.1) 0%,rgba(0,40,20,.3) 100%);box-shadow:0 0 20px rgba(0,255,136,.2)}
+.warmup-header{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.warmup-icon{font-size:16px;filter:drop-shadow(0 0 5px currentColor)}
 .warmup-text{flex:1;font-size:11px;color:#aaa}
-.warmup-section.ready .warmup-text{color:#00e676}
-.warmup-pct{font-size:12px;font-weight:700;color:#f1c40f}
-.warmup-section.ready .warmup-pct{color:#00e676}
-.warmup-bar-bg{height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden;margin-bottom:8px}
-.warmup-bar-fill{height:100%;background:linear-gradient(90deg,#f39c12 0%,#f1c40f 100%);transition:width .3s;border-radius:2px}
-.warmup-section.ready .warmup-bar-fill{background:linear-gradient(90deg,#00c853 0%,#00e676 100%)}
-.warmup-indicators{display:flex;gap:8px;flex-wrap:wrap}
-.indicator-item{font-size:9px;padding:2px 6px;background:rgba(255,255,255,.05);border-radius:4px;color:#888}
-.indicator-item.bullish{background:rgba(0,230,118,.15);color:#00e676}
-.indicator-item.bearish{background:rgba(231,76,60,.15);color:#e74c3c}
-.indicator-item.neutral{background:rgba(241,196,15,.15);color:#f1c40f}
+.warmup-section.ready .warmup-text{color:#00ff88;text-shadow:0 0 5px #00ff88}
+.warmup-pct{font-size:14px;font-weight:700;color:#ffff00;text-shadow:0 0 10px #ffff00}
+.warmup-section.ready .warmup-pct{color:#00ff88;text-shadow:0 0 10px #00ff88}
+.warmup-bar-bg{height:6px;background:rgba(255,255,255,.1);border-radius:3px;overflow:hidden;margin-bottom:10px}
+.warmup-bar-fill{height:100%;background:linear-gradient(90deg,#ff00ff 0%,#00ffff 50%,#00ff88 100%);transition:width .3s;border-radius:3px;box-shadow:0 0 10px rgba(0,255,255,.5)}
+.warmup-section.ready .warmup-bar-fill{background:linear-gradient(90deg,#00ff88 0%,#00ffff 100%)}
+.warmup-indicators{display:flex;gap:6px;flex-wrap:wrap}
+.indicator-item{font-size:10px;padding:4px 8px;background:rgba(0,0,0,.3);border-radius:6px;color:#888;border:1px solid rgba(255,255,255,.1)}
+.indicator-item.bullish{background:rgba(0,255,136,.15);color:#00ff88;border-color:rgba(0,255,136,.3);text-shadow:0 0 5px #00ff88}
+.indicator-item.bearish{background:rgba(255,0,128,.15);color:#ff0080;border-color:rgba(255,0,128,.3);text-shadow:0 0 5px #ff0080}
+.indicator-item.neutral{background:rgba(255,255,0,.15);color:#ffff00;border-color:rgba(255,255,0,.3);text-shadow:0 0 5px #ffff00}
+.config-section-title{font-size:10px;color:#00ffff;margin:12px 0 8px;padding-bottom:4px;border-bottom:1px solid rgba(0,255,255,.2);text-transform:uppercase;letter-spacing:1px}
 </style>
 
 <div class="hud-header" id="worbit-header">
@@ -2294,27 +2399,46 @@ function initSystem() {
     <span class="acc-badge" id="acc-type">DEMO</span>
     <span class="acc-balance" id="acc-bal">$0.00</span>
     <span class="live-price price-down" id="ui-price">--</span>
-    <span class="source-badge" id="ui-source">--</span>
   </div>
-  
-  <div class="controls-row">
-    <div class="switch-box" id="sw-auto"><span class="switch-label">Auto</span></div>
-    <div class="switch-box" id="sw-mg"><span class="switch-label">MG</span></div>
-    <div class="switch-box" id="sw-inv"><span class="switch-label">INV</span></div>
-    <div class="switch-box" id="sw-chart"><span class="switch-label">📊</span></div>
-  </div>
-  
+
   <div class="stats-row">
     <div class="stat-item"><div class="stat-val win" id="ui-w">0</div><div class="stat-label">Ganadas</div></div>
     <div class="stat-item"><div class="stat-val loss" id="ui-l">0</div><div class="stat-label">Perdidas</div></div>
     <div class="stat-item"><div class="stat-val" id="ui-wr">--%</div><div class="stat-label">Win Rate</div></div>
   </div>
-  
+
   <div class="section-header" id="config-header">
     <span class="section-title">⚙️ CONFIGURACIÓN</span>
     <span class="section-toggle" id="config-toggle">▼</span>
   </div>
   <div class="config-panel" id="config-panel">
+    <div class="config-section-title">MODO DE OPERACIÓN</div>
+    <div class="switch-box" id="sw-auto">
+      <span class="switch-label">Auto Trading</span>
+      <div class="switch-toggle"></div>
+    </div>
+    <div class="switch-box" id="sw-mg">
+      <span class="switch-label">Martingala</span>
+      <div class="switch-toggle"></div>
+    </div>
+    <div class="switch-box" id="sw-inv">
+      <span class="switch-label">Invertir Señales</span>
+      <div class="switch-toggle"></div>
+    </div>
+    <div class="switch-box" id="sw-confirm">
+      <span class="switch-label">Confirmación Extra</span>
+      <div class="switch-toggle"></div>
+    </div>
+    <div class="switch-box" id="sw-next">
+      <span class="switch-label">Operar Siguiente Vela</span>
+      <div class="switch-toggle"></div>
+    </div>
+    <div class="switch-box" id="sw-chart">
+      <span class="switch-label">Usar Datos del Gráfico</span>
+      <div class="switch-toggle"></div>
+    </div>
+
+    <div class="config-section-title">PARÁMETROS</div>
     <div class="config-row">
       <span class="config-label">% Riesgo</span>
       <input type="number" class="config-input" id="risk-pct" value="1" min="0.1" max="100" step="0.1">
@@ -2329,64 +2453,54 @@ function initSystem() {
     </div>
     <div class="config-row">
       <span class="config-label">Entrada (seg)</span>
-      <input type="number" class="config-input" id="entry-sec" value="59" min="50" max="59">
+      <input type="number" class="config-input" id="entry-sec" value="57" min="50" max="59">
     </div>
     <div class="config-row">
       <span class="config-label">Offset Timer (ms)</span>
       <input type="number" class="config-input" id="timer-delay" value="0" min="-5000" max="5000" step="100">
     </div>
-    <div class="checkbox-row">
-      <input type="checkbox" id="chk-confirm">
-      <label for="chk-confirm">Confirmación extra</label>
+
+    <div class="config-section-title">STOP AUTOMÁTICO</div>
+    <div class="switch-box" id="sw-time">
+      <span class="switch-label">Por Tiempo</span>
+      <div class="switch-toggle"></div>
     </div>
-    <div class="checkbox-row">
-      <input type="checkbox" id="chk-next">
-      <label for="chk-next">Operar en siguiente vela</label>
+    <div class="stop-group disabled-group" id="grp-time">
+      <div class="config-row">
+        <span class="config-label">Minutos</span>
+        <input type="number" class="config-input" id="session-time" value="60" min="1" max="480">
+      </div>
     </div>
-    
-    <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.1)">
-      <div style="font-size:10px;color:#888;margin-bottom:8px">STOP AUTOMÁTICO</div>
-      <div class="checkbox-row">
-        <input type="checkbox" id="chk-time">
-        <label for="chk-time">Por tiempo</label>
+    <div class="switch-box" id="sw-risk">
+      <span class="switch-label">Por Riesgo</span>
+      <div class="switch-toggle"></div>
+    </div>
+    <div class="stop-group disabled-group" id="grp-risk">
+      <div class="config-row">
+        <span class="config-label">Take Profit %</span>
+        <input type="number" class="config-input" id="profit-target" value="10" min="1" max="100">
       </div>
-      <div class="stop-group disabled-group" id="grp-time">
-        <div class="config-row">
-          <span class="config-label">Minutos</span>
-          <input type="number" class="config-input" id="session-time" value="60" min="1" max="480">
-        </div>
+      <div class="config-row">
+        <span class="config-label">Stop Loss %</span>
+        <input type="number" class="config-input" id="stop-loss" value="10" min="1" max="100">
       </div>
-      <div class="checkbox-row">
-        <input type="checkbox" id="chk-risk">
-        <label for="chk-risk">Por riesgo</label>
+    </div>
+    <div class="switch-box" id="sw-trades">
+      <span class="switch-label">Por Trades</span>
+      <div class="switch-toggle"></div>
+    </div>
+    <div class="stop-group disabled-group" id="grp-trades">
+      <div class="config-row">
+        <span class="config-label">Max Wins</span>
+        <input type="number" class="config-input" id="max-wins" value="5" min="1" max="100">
       </div>
-      <div class="stop-group disabled-group" id="grp-risk">
-        <div class="config-row">
-          <span class="config-label">Take Profit %</span>
-          <input type="number" class="config-input" id="profit-target" value="10" min="1" max="100">
-        </div>
-        <div class="config-row">
-          <span class="config-label">Stop Loss %</span>
-          <input type="number" class="config-input" id="stop-loss" value="10" min="1" max="100">
-        </div>
-      </div>
-      <div class="checkbox-row">
-        <input type="checkbox" id="chk-trades">
-        <label for="chk-trades">Por trades</label>
-      </div>
-      <div class="stop-group disabled-group" id="grp-trades">
-        <div class="config-row">
-          <span class="config-label">Max Wins</span>
-          <input type="number" class="config-input" id="max-wins" value="5" min="1" max="100">
-        </div>
-        <div class="config-row">
-          <span class="config-label">Max Losses</span>
-          <input type="number" class="config-input" id="max-losses" value="3" min="1" max="100">
-        </div>
+      <div class="config-row">
+        <span class="config-label">Max Losses</span>
+        <input type="number" class="config-input" id="max-losses" value="3" min="1" max="100">
       </div>
     </div>
   </div>
-  
+
   <div class="timer-section">
     <div class="timer-header">
       <span id="timer-text">⏱ Cierre: --s</span>
@@ -2394,11 +2508,10 @@ function initSystem() {
     </div>
     <div id="timer-bar-bg"><div id="timer-bar-fill"></div></div>
   </div>
-  
+
   <div class="info-grid">
-    <div class="stat-box"><div class="stat-label">ACTIVO</div><div class="stat-val" id="ui-active" style="color:#3498db;font-size:10px">--</div></div>
-    <div class="stat-box"><div class="stat-label">VELAS</div><div class="stat-val" id="ui-cnt">0/${TARGET_CANDLES}</div></div>
-    <div class="stat-box" id="mg-box" style="display:none"><div class="stat-label">NIVEL MG</div><div class="stat-val" id="ui-mg" style="color:#f1c40f">0</div></div>
+    <div class="stat-box"><div class="stat-label">ACTIVO</div><div class="stat-val" id="ui-active" style="color:#00ffff;font-size:10px;text-shadow:0 0 5px #00ffff">--</div></div>
+    <div class="stat-box" id="mg-box" style="display:none"><div class="stat-label">NIVEL MG</div><div class="stat-val" id="ui-mg" style="color:#ff00ff;text-shadow:0 0 5px #ff00ff">0</div></div>
   </div>
 
   <!-- V12: Indicador de Warmup del Sistema -->
@@ -2418,8 +2531,10 @@ function initSystem() {
     </div>
   </div>
 
-  <div id="signal-box"><div style="font-size:11px;color:#666">INICIAR PARA ANALIZAR</div></div>
-  
+  <div id="signal-box">
+    <div class="signal-status" style="font-size:11px;color:#00ffff">INICIAR PARA ANALIZAR</div>
+  </div>
+
   <div class="monitor-container">
     <div class="section-header" id="log-header">
       <span class="section-title">📋 REGISTRO</span>
@@ -2429,7 +2544,7 @@ function initSystem() {
       <div class="monitor-line"><span class="monitor-time">--:--:--</span> <span class="monitor-info">Sistema listo</span></div>
     </div>
   </div>
-  
+
   <button class="btn-main btn-start" id="main-btn">INICIAR SISTEMA</button>
 </div>`;
       document.body.appendChild(hud);
@@ -2443,40 +2558,45 @@ function initSystem() {
       accType: $('acc-type'),
       accBal: $('acc-bal'),
       uiPrice: $('ui-price'),
-      uiSource: $('ui-source'),
+      // Switches de configuración
       swAuto: $('sw-auto'),
-      swChart: $('sw-chart'),
-      riskPct: $('risk-pct'),
       swMg: $('sw-mg'),
       swInv: $('sw-inv'),
+      swConfirm: $('sw-confirm'),
+      swNext: $('sw-next'),
+      swChart: $('sw-chart'),
+      swTime: $('sw-time'),
+      swRisk: $('sw-risk'),
+      swTrades: $('sw-trades'),
+      // Inputs de configuración
+      riskPct: $('risk-pct'),
       mgSteps: $('mg-steps'),
       mgFactor: $('mg-factor'),
       entrySec: $('entry-sec'),
       timerDelay: $('timer-delay'),
-      chkConfirm: $('chk-confirm'),
-      chkNext: $('chk-next'),
+      // Paneles
       configHeader: $('config-header'),
       configPanel: $('config-panel'),
       configToggle: $('config-toggle'),
       logHeader: $('log-header'),
       logToggle: $('log-toggle'),
+      // Stats
       uiW: $('ui-w'),
       uiL: $('ui-l'),
       uiWr: $('ui-wr'),
+      // Timer
       timerText: $('timer-text'),
       timerFill: $('timer-bar-fill'),
       uiRuntime: $('ui-runtime'),
+      // Info
       uiActive: $('ui-active'),
-      uiCnt: $('ui-cnt'),
       uiMg: $('ui-mg'),
       mgBox: $('mg-box'),
       signalBox: $('signal-box'),
       monitorBox: $('monitor-box'),
       mainBtn: $('main-btn'),
       closeBtn: $('close-btn'),
-      chkTime: $('chk-time'),
-      chkRisk: $('chk-risk'),
-      chkTrades: $('chk-trades'),
+      // Stop groups
       grpTime: $('grp-time'),
       grpRisk: $('grp-risk'),
       grpTrades: $('grp-trades'),
@@ -2564,31 +2684,39 @@ function initSystem() {
       config.timeOffset = parseInt(this.value) || 0;
       saveConfigToStorage();
     };
-    if (DOM.chkConfirm) DOM.chkConfirm.onchange = function() {
-      config.useConfirmation = this.checked;
+    // Switch de confirmación extra
+    if (DOM.swConfirm) DOM.swConfirm.onclick = function() {
+      config.useConfirmation = !config.useConfirmation;
+      this.classList.toggle('active', config.useConfirmation);
       logMonitor(`Confirmación: ${config.useConfirmation ? 'ON' : 'OFF'}`);
       saveConfigToStorage();
     };
-    if (DOM.chkNext) DOM.chkNext.onchange = function() {
-      config.operateOnNext = this.checked;
+
+    // Switch de operar en siguiente vela
+    if (DOM.swNext) DOM.swNext.onclick = function() {
+      config.operateOnNext = !config.operateOnNext;
+      this.classList.toggle('active', config.operateOnNext);
       logMonitor(`Modo: ${config.operateOnNext ? 'SIGUIENTE VELA' : 'VELA ACTUAL'}`);
       saveConfigToStorage();
     };
-    
-    // Stop Config
-    if (DOM.chkTime) DOM.chkTime.onchange = function() {
-      config.stopConfig.useTime = this.checked;
-      DOM.grpTime.classList.toggle('disabled-group', !this.checked);
+
+    // Stop Config Switches
+    if (DOM.swTime) DOM.swTime.onclick = function() {
+      config.stopConfig.useTime = !config.stopConfig.useTime;
+      this.classList.toggle('active', config.stopConfig.useTime);
+      DOM.grpTime.classList.toggle('disabled-group', !config.stopConfig.useTime);
       saveConfigToStorage();
     };
-    if (DOM.chkRisk) DOM.chkRisk.onchange = function() {
-      config.stopConfig.useRisk = this.checked;
-      DOM.grpRisk.classList.toggle('disabled-group', !this.checked);
+    if (DOM.swRisk) DOM.swRisk.onclick = function() {
+      config.stopConfig.useRisk = !config.stopConfig.useRisk;
+      this.classList.toggle('active', config.stopConfig.useRisk);
+      DOM.grpRisk.classList.toggle('disabled-group', !config.stopConfig.useRisk);
       saveConfigToStorage();
     };
-    if (DOM.chkTrades) DOM.chkTrades.onchange = function() {
-      config.stopConfig.useTrades = this.checked;
-      DOM.grpTrades.classList.toggle('disabled-group', !this.checked);
+    if (DOM.swTrades) DOM.swTrades.onclick = function() {
+      config.stopConfig.useTrades = !config.stopConfig.useTrades;
+      this.classList.toggle('active', config.stopConfig.useTrades);
+      DOM.grpTrades.classList.toggle('disabled-group', !config.stopConfig.useTrades);
       saveConfigToStorage();
     };
     if (DOM.sessionTime) DOM.sessionTime.onchange = function() {
