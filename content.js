@@ -9,6 +9,8 @@ console.log('[CS] Content Script cargado - Worbit Sniper V11.0');
 // ============= ESTADO =============
 let isInjected = false;
 let reconnectAttempts = 0;
+let isContextInvalidated = false;
+let pingInterval = null;
 const MAX_RECONNECT_ATTEMPTS = 5;
 
 // ============= INYECCIÓN DEL SCRIPT PRINCIPAL =============
@@ -33,7 +35,8 @@ function injectMainScript() {
 // Verificar si el contexto de la extensión es válido
 function isExtensionContextValid() {
   try {
-    return chrome.runtime && chrome.runtime.id;
+    // Acceder a chrome.runtime puede lanzar error si el contexto es inválido
+    return !!(chrome && chrome.runtime && !!chrome.runtime.id);
   } catch (e) {
     return false;
   }
@@ -41,26 +44,65 @@ function isExtensionContextValid() {
 
 // Enviar mensaje al background con retry
 async function sendToBackground(message, retries = 3) {
+  // Si ya sabemos que está invalidado, no hacer nada
+  if (isContextInvalidated) return null;
+
   // Verificar contexto antes de intentar
   if (!isExtensionContextValid()) {
-    console.warn('[CS] Contexto de extensión invalidado, recargue la página');
+    if (!isContextInvalidated) {
+        // Silencioso para evitar ruido en logs de extensión
+        console.log('[CS] Contexto invalidado - Deteniendo comunicación');
+        isContextInvalidated = true;
+        if (pingInterval) clearInterval(pingInterval);
+    }
     return null;
   }
 
   for (let i = 0; i < retries; i++) {
     try {
-      const response = await chrome.runtime.sendMessage(message);
+      const response = await new Promise((resolve, reject) => {
+        try {
+          chrome.runtime.sendMessage(message, (res) => {
+            const err = chrome.runtime.lastError;
+            if (err) {
+              // Filtrar errores de conexión cerrados que son normales al recargar
+              if (err.message && (
+                  err.message.includes('closed') || 
+                  err.message.includes('port') ||
+                  err.message.includes('context invalidated')
+              )) {
+                reject(new Error('Extension context invalidated'));
+              } else {
+                reject(err);
+              }
+            } else {
+              resolve(res);
+            }
+          });
+        } catch (syncErr) {
+          reject(syncErr);
+        }
+      });
       return response;
     } catch (e) {
       // Si el contexto se invalidó, no reintentar
-      if (e.message && e.message.includes('Extension context invalidated')) {
-        console.warn('[CS] Extensión recargada, por favor recargue la página');
-        window.postMessage({ type: 'SNIPER_EXTENSION_RELOADED' }, '*');
+      const errMsg = e.message || '';
+      if (errMsg.includes('Extension context invalidated') || errMsg.includes('Invocation of form runtime.connect') || errMsg.includes('validating')) {
+        if (!isContextInvalidated) {
+            console.log('[CS] Extensión recargada/invalidada, deteniendo comunicación');
+            isContextInvalidated = true;
+            if (pingInterval) clearInterval(pingInterval);
+            // Notificar a la página para que deje de enviar mensajes
+            window.postMessage({ type: 'SNIPER_EXTENSION_RELOADED' }, '*');
+        }
         return null;
       }
+      
       if (i === retries - 1) {
-        // Solo loguear como warning, no como error
-        console.warn('[CS] No se pudo conectar con background:', e.message);
+        // Solo loguear como warning si no es error de contexto
+        if (!isContextInvalidated) {
+            console.log('[CS] Fallo conexión background:', errMsg);
+        }
         return null;
       }
       await new Promise(r => setTimeout(r, 100 * (i + 1)));
@@ -151,7 +193,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // ============= KEEP-ALIVE =============
 // Ping periódico para mantener la comunicación activa
-setInterval(() => {
+pingInterval = setInterval(() => {
+  if (isContextInvalidated) {
+      clearInterval(pingInterval);
+      return;
+  }
+
   // No hacer ping si el contexto es inválido
   if (!isExtensionContextValid()) {
     return;
@@ -168,7 +215,7 @@ setInterval(() => {
       }
     }
   });
-}, 10000); // Aumentado a 10 segundos para reducir carga
+}, 10000);
 
 // ============= INICIALIZACIÓN =============
 function init() {
