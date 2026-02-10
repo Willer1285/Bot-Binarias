@@ -15,6 +15,8 @@ const DATA_TIMEOUT = 8000;
 const WS_RECONNECT_DELAYS = [2000, 5000, 10000, 15000, 30000];
 const WS_MAX_RECONNECT_ATTEMPTS = 9999;
 const MIN_TREND_CANDLES = 5;
+const MIN_TRADE_INTERVAL = 5000;       // Mínimo 5 segundos entre trades
+const MAX_CONSECUTIVE_LOSSES = 5;      // Máximo de pérdidas consecutivas antes de pausa
 
 // ============= HUD HTML & CSS =============
 const HUD_HTML = `
@@ -361,6 +363,501 @@ let tickerInterval = null;
 let sessionInterval = null;
 let healthCheckInterval = null;
 let warmupInterval = null;
+
+// ============= FUNCIONES ESENCIALES RESTAURADAS =============
+
+function logMonitor(msg, type = 'info') {
+  if (!DOM.monitorBox) return;
+
+  const now = new Date();
+  const time = now.toTimeString().slice(0,8);
+  const cls = type === 'success' ? 'monitor-success' :
+              type === 'blocked' ? 'monitor-blocked' :
+              type === 'pattern' ? 'monitor-pattern' : 'monitor-info';
+
+  const line = document.createElement('div');
+  line.className = 'monitor-line';
+  line.innerHTML = `<span class="monitor-time">${time}</span> <span class="${cls}">${msg}</span>`;
+
+  DOM.monitorBox.appendChild(line);
+
+  while (DOM.monitorBox.children.length > MAX_LOGS) {
+    DOM.monitorBox.removeChild(DOM.monitorBox.firstChild);
+  }
+
+  DOM.monitorBox.scrollTop = DOM.monitorBox.scrollHeight;
+}
+
+function readAccount() {
+  try {
+    let foundBalance = false;
+    let foundAccountType = false;
+    let newBalance = 0;
+    let newIsDemo = isDemo;
+
+    // MÉTODO 1: Selectores específicos de Worbit (más confiable)
+    try {
+      const accTypeEl = document.querySelector('._account-type_s372q_154, [class*="account-type"]');
+      if (accTypeEl) {
+        const text = accTypeEl.textContent.toLowerCase();
+        newIsDemo = text.includes('demo');
+        foundAccountType = true;
+      }
+
+      const balEl = document.querySelector('._account-value_s372q_159, [class*="account-value"]');
+      if (balEl) {
+        const text = balEl.textContent.replace(/[^0-9.,]/g, '').replace(',', '');
+        const val = parseFloat(text);
+        if (!isNaN(val) && val > 0) {
+          newBalance = val;
+          foundBalance = true;
+        }
+      }
+    } catch (e) {}
+
+    // MÉTODO 2: Buscar en header elementos con "$"
+    if (!foundBalance) {
+      try {
+        const headerElements = document.querySelectorAll('header *, [class*="header"] *, [class*="nav"] *');
+        for (const el of headerElements) {
+          if (el.children.length === 0 || el.tagName === 'SPAN' || el.tagName === 'DIV') {
+            const text = el.textContent || '';
+            const accountMatch = text.match(/cuenta\s*(demo|real|bono)/i);
+            if (accountMatch && !foundAccountType) {
+              newIsDemo = accountMatch[1].toLowerCase() === 'demo';
+              foundAccountType = true;
+            }
+            const balanceMatch = text.match(/\$\s*([\d,]+\.?\d*)/);
+            if (balanceMatch && !foundBalance) {
+              let balanceStr = balanceMatch[1].replace(/,/g, '');
+              const parsedBalance = parseFloat(balanceStr);
+              if (!isNaN(parsedBalance) && parsedBalance > 0) {
+                newBalance = parsedBalance;
+                foundBalance = true;
+              }
+            }
+            if (foundBalance && foundAccountType) break;
+          }
+        }
+      } catch (e) {}
+    }
+
+    // MÉTODO 3: Zustand Store (localStorage)
+    if (!foundBalance) {
+      try {
+        const walletStore = localStorage.getItem('wallet-store');
+        if (walletStore) {
+          const parsed = JSON.parse(walletStore);
+          if (parsed && parsed.state) {
+            if (typeof parsed.state.isDemo !== 'undefined' && !foundAccountType) {
+              newIsDemo = parsed.state.isDemo;
+              foundAccountType = true;
+            }
+            if (parsed.state.wallets && Array.isArray(parsed.state.wallets) && !foundBalance) {
+              const accountType = newIsDemo ? 'DEMO' : 'REAL';
+              const wallet = parsed.state.wallets.find(w => w.type === accountType);
+              if (wallet && typeof wallet.balance !== 'undefined') {
+                let rawBalance = wallet.balance;
+                if (typeof rawBalance === 'string') rawBalance = rawBalance.replace(/[^0-9.-]/g, '');
+                let parsedBal = parseFloat(rawBalance) || 0;
+                if (parsedBal > 10000 && parsedBal.toString().length >= 6) parsedBal = parsedBal / 100;
+                if (parsedBal > 0) {
+                  newBalance = parsedBal;
+                  foundBalance = true;
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {}
+    }
+
+    if (!foundAccountType) newIsDemo = true;
+
+    // Actualizar estado y UI
+    const balanceChanged = Math.abs(newBalance - lastLoggedBalance) > 0.01;
+    const shouldLog = foundBalance && (!balanceLoaded || balanceChanged);
+
+    if (foundBalance) {
+      balance = newBalance;
+      isDemo = newIsDemo;
+      if (shouldLog) {
+        logMonitor(`✓ Cuenta ${isDemo ? 'DEMO' : 'REAL'}: $${balance.toFixed(2)}`, 'success');
+        lastLoggedBalance = balance;
+        balanceLoaded = true;
+      }
+    }
+
+    if (DOM.accType) {
+      DOM.accType.textContent = isDemo ? 'DEMO' : isDemo === false ? 'REAL' : 'DEMO';
+      DOM.accType.style.background = isDemo ? 'rgba(241,196,15,.2)' : 'rgba(0,230,118,.2)';
+      DOM.accType.style.color = isDemo ? '#f1c40f' : '#00e676';
+    }
+    if (DOM.accBal) {
+      DOM.accBal.textContent = `$${balance.toFixed(2)}`;
+    }
+
+    if (!balanceLoaded && !foundBalance) {
+      logMonitor('⚠ No se pudo detectar saldo', 'blocked');
+    }
+
+  } catch (e) {
+    if (!balanceLoaded) {
+      logMonitor('❌ Error en readAccount: ' + e.message, 'blocked');
+    }
+  }
+}
+
+function calcAmount() {
+  let base = (balance * config.riskPct) / 100;
+  let multiplier = 1;
+  if (config.useMartingale && mgLevel > 0) {
+    multiplier = Math.pow(config.mgFactor, mgLevel);
+  }
+  currentAmt = Math.max(1, base * multiplier);
+}
+
+function getCurrentPrice() {
+  if (lastWsData && lastWsData.closePrice) return lastWsData.closePrice;
+  if (currentCandle && currentCandle.c) return currentCandle.c;
+  return 0;
+}
+
+function updateStats() {
+  if (DOM.uiW) DOM.uiW.textContent = stats.w;
+  if (DOM.uiL) DOM.uiL.textContent = stats.l;
+  const total = stats.w + stats.l;
+  const wr = total > 0 ? ((stats.w / total) * 100).toFixed(0) : '--';
+  if (DOM.uiWr) DOM.uiWr.textContent = `${wr}%`;
+  if (DOM.uiMg) DOM.uiMg.textContent = mgLevel;
+}
+
+function updateWarmupUI() {
+  if (DOM.warmupContainer) {
+    if (isSystemWarmedUp) {
+      DOM.warmupContainer.style.display = 'none';
+    } else if (isRunning) {
+      DOM.warmupContainer.style.display = 'block';
+    } else {
+      DOM.warmupContainer.style.display = 'none';
+    }
+  }
+
+  if (DOM.warmupPct) DOM.warmupPct.textContent = `${systemWarmupLevel}%`;
+  if (DOM.warmupBarFill) DOM.warmupBarFill.style.width = `${systemWarmupLevel}%`;
+
+  if (DOM.warmupText) {
+    if (isSystemWarmedUp) {
+      DOM.warmupText.textContent = 'Listo';
+    } else {
+      const analysisCandles = getAnalysisCandles();
+      DOM.warmupText.textContent = `Velas ${analysisCandles.length}/${TARGET_CANDLES_FULL}`;
+    }
+  }
+
+  if (DOM.indTrend) {
+    DOM.indTrend.textContent = currentTrend.toUpperCase();
+    DOM.indTrend.style.color = currentTrend === 'bullish' ? '#00ff88' : currentTrend === 'bearish' ? '#ff5555' : '#ffff00';
+  }
+}
+
+function updateTrend() {
+  if (candles.length < MIN_TREND_CANDLES) {
+    currentTrend = 'neutral';
+    return;
+  }
+  const recent = candles.slice(-MIN_TREND_CANDLES);
+  let greens = 0, reds = 0;
+  for (let i = 0; i < recent.length; i++) {
+    if (recent[i].c > recent[i].o) greens++;
+    else if (recent[i].c < recent[i].o) reds++;
+  }
+  // Verificar cierre progresivo
+  const closesRising = recent[recent.length-1].c > recent[0].c;
+  const closesFalling = recent[recent.length-1].c < recent[0].c;
+
+  if (greens >= Math.ceil(MIN_TREND_CANDLES * 0.6) && closesRising) {
+    currentTrend = 'bullish';
+  } else if (reds >= Math.ceil(MIN_TREND_CANDLES * 0.6) && closesFalling) {
+    currentTrend = 'bearish';
+  } else {
+    currentTrend = 'neutral';
+  }
+}
+
+function setTradeAmount(targetAmount) {
+  try {
+    const amountInput = document.querySelector('input[type="number"][class*="_input-operator_"]') ||
+                        document.querySelector('input[type="number"].ant-input');
+    if (amountInput) {
+      const target = Math.round(targetAmount * 100) / 100;
+      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      nativeInputValueSetter.call(amountInput, target.toFixed(2));
+      amountInput.dispatchEvent(new Event('input', { bubbles: true }));
+      amountInput.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
+function executeTrade(type) {
+  if (!config.autoTrade) {
+    logMonitor('AutoTrade desactivado', 'info');
+    return false;
+  }
+
+  if (type !== 'call' && type !== 'put') {
+    logMonitor(`Tipo de trade inválido: ${type}`, 'blocked');
+    return false;
+  }
+
+  if (!wsConnected) {
+    logMonitor('⚠️ Sin conexión WebSocket - Trade cancelado', 'blocked');
+    return false;
+  }
+
+  const now = Date.now();
+  if (now - lastTradeTime < MIN_TRADE_INTERVAL) {
+    const waitTime = Math.ceil((MIN_TRADE_INTERVAL - (now - lastTradeTime)) / 1000);
+    logMonitor(`⏳ Espera ${waitTime}s entre trades`, 'info');
+    return false;
+  }
+
+  if (consecutiveLosses >= MAX_CONSECUTIVE_LOSSES) {
+    logMonitor(`⛔ Pausa automática: ${consecutiveLosses} pérdidas consecutivas`, 'blocked');
+    logMonitor('Desactiva y activa AutoTrade para continuar', 'info');
+    return false;
+  }
+
+  if (balance <= 0) {
+    logMonitor('Balance insuficiente para operar', 'blocked');
+    return false;
+  }
+
+  calcAmount();
+
+  if (currentAmt < 1) {
+    logMonitor('Monto mínimo es $1.00', 'blocked');
+    currentAmt = 1;
+  }
+
+  if (currentAmt > balance) {
+    logMonitor(`Monto ajustado al balance: $${balance.toFixed(2)}`, 'info');
+    currentAmt = balance;
+  }
+
+  if (!isDemo && currentAmt > balance * 0.1) {
+    logMonitor(`⚠️ CUENTA REAL: Trade de ${((currentAmt/balance)*100).toFixed(1)}% del balance`, 'pattern');
+  }
+
+  const amountSet = setTradeAmount(currentAmt);
+  if (!amountSet) {
+    logMonitor('No se pudo configurar el monto', 'blocked');
+  }
+
+  lastTradeTime = now;
+
+  logMonitor(`Ejecutando ${type.toUpperCase()} - $${currentAmt.toFixed(2)}`, 'success');
+
+  executeTradeWithRetry(type, 3);
+  return true;
+}
+
+function checkTradeResults(candle) {
+  const toRemove = [];
+  pendingTrades.forEach((t, i) => {
+    if (t.k === candle.s) {
+      const referencePrice = t.entryPrice || candle.o;
+
+      const winCall = t.type === 'call' && candle.c > referencePrice;
+      const winPut = t.type === 'put' && candle.c < referencePrice;
+      const isWin = winCall || winPut;
+      const isDraw = candle.c === referencePrice;
+
+      const priceChange = ((candle.c - referencePrice) / referencePrice * 100).toFixed(4);
+      const direction = candle.c > referencePrice ? '↑' : candle.c < referencePrice ? '↓' : '→';
+
+      if (isWin) {
+        stats.w++;
+        sessionStats.w++;
+        consecutiveLosses = 0;
+        mgLevel = 0;
+        activeMartingaleTrade = null;
+        logMonitor(`✅ GANADA ${direction}${priceChange}% (${referencePrice.toFixed(2)} → ${candle.c.toFixed(2)})`, 'success');
+      } else if (!isDraw) {
+        consecutiveLosses++;
+        if (config.useMartingale) {
+          const stopLossTrigger = (t.type === 'call' && isStrongMomentum(candles, 'bearish')) ||
+                                  (t.type === 'put' && isStrongMomentum(candles, 'bullish'));
+          if (stopLossTrigger) {
+            stats.l++;
+            sessionStats.l++;
+            mgLevel = 0;
+            activeMartingaleTrade = null;
+            logMonitor(`⛔ Momentum en contra - Stop ${direction}${priceChange}%`, 'blocked');
+          } else if (mgLevel < config.mgMaxSteps) {
+            mgLevel++;
+            activeMartingaleTrade = { type: t.type };
+            logMonitor(`❌ PERDIDA ${direction}${priceChange}% - Martingala ${mgLevel}/${config.mgMaxSteps}`, 'blocked');
+          } else {
+            stats.l++;
+            sessionStats.l++;
+            mgLevel = 0;
+            activeMartingaleTrade = null;
+            logMonitor(`⛔ Max Martingala - Stop ${direction}${priceChange}%`, 'blocked');
+          }
+        } else {
+          stats.l++;
+          sessionStats.l++;
+          logMonitor(`❌ PERDIDA ${direction}${priceChange}% (${referencePrice.toFixed(2)} → ${candle.c.toFixed(2)})`, 'blocked');
+        }
+        if (consecutiveLosses >= 3) {
+          logMonitor(`⚠️ ${consecutiveLosses} pérdidas consecutivas`, 'pattern');
+        }
+      } else {
+        logMonitor(`↔️ EMPATE @ ${referencePrice.toFixed(2)}`, 'info');
+      }
+
+      toRemove.push(i);
+      updateStats();
+      readAccount(); // Releer balance tras resultado
+    }
+  });
+
+  toRemove.reverse().forEach(i => pendingTrades.splice(i, 1));
+}
+
+function checkSafeStop() {
+  if (!isRunning) return;
+
+  // No parar si hay trades pendientes o martingala activa
+  if (pendingTrades.length > 0 || activeMartingaleTrade) return;
+
+  // Si ya hay parada pendiente y no hay trades, parar ahora
+  if (isStopPending) {
+    logMonitor(`🛑 Parada segura: ${stopPendingReason}`, 'blocked');
+    stopBot();
+    return;
+  }
+
+  const sc = config.stopConfig;
+
+  if (sc.useTime && sc.timeMin > 0 && startTime > 0) {
+    const elapsedMin = (Date.now() - startTime) / 60000;
+    if (elapsedMin >= sc.timeMin) {
+      isStopPending = true;
+      stopPendingReason = `Tiempo (${sc.timeMin} min)`;
+      logMonitor('⏱ Límite de tiempo alcanzado', 'blocked');
+      if (pendingTrades.length === 0 && !activeMartingaleTrade) stopBot();
+      return;
+    }
+  }
+
+  if (sc.useRisk && initialBalance > 0) {
+    const profit = balance - initialBalance;
+    const profitPct = (profit / initialBalance) * 100;
+    if (sc.profitPct > 0 && profitPct >= sc.profitPct) {
+      isStopPending = true;
+      stopPendingReason = `Take Profit (+${profitPct.toFixed(1)}%)`;
+      logMonitor(`💰 Take Profit: +${profitPct.toFixed(1)}%`, 'success');
+      stopBot();
+      return;
+    }
+    if (sc.stopLossPct > 0 && profitPct <= -sc.stopLossPct) {
+      isStopPending = true;
+      stopPendingReason = `Stop Loss (${profitPct.toFixed(1)}%)`;
+      logMonitor(`⛔ Stop Loss: ${profitPct.toFixed(1)}%`, 'blocked');
+      stopBot();
+      return;
+    }
+  }
+
+  if (sc.useTrades) {
+    if (sc.maxWins > 0 && sessionStats.w >= sc.maxWins) {
+      isStopPending = true;
+      stopPendingReason = `Max Wins (${sessionStats.w})`;
+      logMonitor(`🎯 Max wins alcanzado: ${sessionStats.w}`, 'success');
+      stopBot();
+      return;
+    }
+    if (sc.maxLosses > 0 && sessionStats.l >= sc.maxLosses) {
+      isStopPending = true;
+      stopPendingReason = `Max Losses (${sessionStats.l})`;
+      logMonitor(`⛔ Max losses alcanzado: ${sessionStats.l}`, 'blocked');
+      stopBot();
+      return;
+    }
+  }
+}
+
+function shouldExecuteMartingale(tradeType) {
+  if (!isSystemWarmedUp) {
+    logMonitor('⏳ Martingala pausada - Sistema en warmup', 'info');
+    return false;
+  }
+
+  if (currentTrend === 'bullish' && tradeType === 'put') {
+    logMonitor('⚠️ Martingala cancelada - Tendencia alcista contra PUT', 'pattern');
+    return false;
+  }
+  if (currentTrend === 'bearish' && tradeType === 'call') {
+    logMonitor('⚠️ Martingala cancelada - Tendencia bajista contra CALL', 'pattern');
+    return false;
+  }
+
+  return true;
+}
+
+function startBot() {
+  if (isRunning) return;
+
+  isRunning = true;
+  isStopPending = false;
+  stopPendingReason = '';
+  startTime = Date.now();
+  initialBalance = balance;
+  sessionStats = { w: 0, l: 0 };
+  mgLevel = 0;
+  tradeExecutedThisCandle = false;
+  lastTradeType = null;
+  activeMartingaleTrade = null;
+  pendingSignal = null;
+  pendingTrades = [];
+  consecutiveLosses = 0;
+
+  setupWebSocketInterceptor();
+
+  // Health check
+  if (healthCheckInterval) clearInterval(healthCheckInterval);
+  healthCheckInterval = setInterval(() => {
+    if (!isRunning) return;
+    const elapsed = Date.now() - lastTickTime;
+    if (elapsed > DATA_TIMEOUT && lastTickTime > 0) {
+      logMonitor('⚠ Sin datos. Verificando...', 'blocked');
+      updateConnectionUI(false);
+    }
+  }, HEALTH_CHECK_INTERVAL);
+
+  startUIUpdateLoop();
+
+  // Diagnóstico inicial con pequeño delay
+  setTimeout(() => runDiagnostics(), 500);
+
+  if (DOM.mainBtn) {
+    DOM.mainBtn.textContent = 'DETENER SISTEMA';
+    DOM.mainBtn.classList.remove('btn-start');
+    DOM.mainBtn.classList.add('btn-stop');
+  }
+
+  readAccount();
+  if (balance > 0) initialBalance = balance;
+  calcAmount();
+
+  logMonitor('🟢 Sistema iniciado', 'success');
+  logMonitor(`Balance: $${balance.toFixed(2)} | Riesgo: ${config.riskPct}% | Monto: $${currentAmt.toFixed(2)}`, 'info');
+  logMonitor(`AutoTrade: ${config.autoTrade ? 'ON' : 'OFF'} | MG: ${config.useMartingale ? 'ON' : 'OFF'}`, 'info');
+}
 
 // ============= FUNCIONES DE ESTADO (Movidias arriba para evitar ReferenceError) =============
 function checkWarmupStatus() {
@@ -1546,6 +2043,7 @@ function onTick(data) {
     
     processed++;
     
+    updateTrend(); // Actualizar tendencia con cada vela cerrada
     checkTradeResults(currentCandle);
     checkSafeStop(); // Verificar si podemos parar después de cerrar vela y procesar resultados
     
@@ -1935,22 +2433,6 @@ window.addEventListener('message', e => {
     wsConnected = false;
     updateConnectionUI(false);
     logMonitor('Conexión perdida', 'blocked');
-  }
-});
-
-window.addEventListener('message', (event) => {
-  if (event.source !== window) return;
-  
-  if (event.data.type === 'SNIPER_CONFIG_LOADED' && event.data.config) {
-    const c = event.data.config;
-    // Merge profundo cuidadoso para stopConfig
-    if (c.stopConfig) {
-        config.stopConfig = { ...config.stopConfig, ...c.stopConfig };
-        delete c.stopConfig; // Ya procesado
-    }
-    config = { ...config, ...c };
-    applyConfigToUI();
-    logMonitor('Configuración restaurada', 'info');
   }
 });
 
