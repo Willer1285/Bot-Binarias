@@ -2366,19 +2366,8 @@ function executeTradeWithRetry(type, maxRetries) {
           try {
               btn.style.border = '2px solid yellow'; // Feedback visual debug
               btn.focus();
-              
-              // 1. Eventos Pointer (Modernos)
-              const pointerOpts = { bubbles: true, cancelable: true, view: window, buttons: 1, pointerId: 1, isPrimary: true };
-              btn.dispatchEvent(new PointerEvent('pointerdown', pointerOpts));
-              btn.dispatchEvent(new PointerEvent('pointerup', pointerOpts));
-              
-              // 2. Eventos Mouse (Legacy/React)
-              const mouseOpts = { bubbles: true, cancelable: true, view: window, buttons: 1 };
-              btn.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
-              btn.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
-              btn.dispatchEvent(new MouseEvent('click', mouseOpts));
 
-              // 3. Click Nativo
+              // Click único nativo - Ant Design/React responde a este evento
               btn.click();
               
               setTimeout(() => btn.style.border = '', 500); // Limpiar debug
