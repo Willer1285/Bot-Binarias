@@ -1,2321 +1,26 @@
-// injected.js - WORBIT SNIPER V12.0 - ESTRATEGIA BLINDADA
-// Características: Sistema de warmup, EMA/ATR filters, Martingala inteligente, Score de señales
+// injected.js - WORBIT SNIPER V15.0 - ESTRATEGIA BLINDADA + DIAGNÓSTICO PROFUNDO
+// Características: Sistema de warmup, Price Action puro, Martingala inteligente, Logs Exhaustivos
 (function() {
 'use strict';
-console.log('%c WORBIT SNIPER V12.0 LOADING...', 'background: #00e676; color: #000; font-size: 14px; padding: 5px;');
+console.log('%c WORBIT SNIPER V15.0 LOADING...', 'background: #00e676; color: #000; font-size: 14px; padding: 5px;');
 
 // ============= CONSTANTES =============
-const VERSION = '12.0';
-const TARGET_CANDLES = 3;           // Mínimo para patrones básicos
-const TARGET_CANDLES_FULL = 21;     // Mínimo para sistema completo (EMA 21)
+const VERSION = '15.0';
+const TARGET_CANDLES = 2;
+const TARGET_CANDLES_FULL = 3;
 const MAX_CANDLES = 200;
-const MAX_LOGS = 20;
+const MAX_LOGS = 50; // Aumentado para ver más historial
 const HEALTH_CHECK_INTERVAL = 3000;
 const DATA_TIMEOUT = 8000;
-const CHART_SYNC_INTERVAL = 1000;
-
-// Constantes de reconexión WebSocket (backoff exponencial rápido)
-const WS_RECONNECT_DELAYS = [100, 300, 500, 1000, 2000];
-const WS_MAX_RECONNECT_ATTEMPTS = 10;
-
-// Constantes de EMA y ATR
-const EMA_FAST_PERIOD = 8;
-const EMA_SLOW_PERIOD = 21;
-const ATR_PERIOD = 14;
-
-// Constantes de Score
-const MIN_SCORE_TO_TRADE = 6;       // Score mínimo para operar (de 10)
-const MIN_SCORE_MARTINGALE = 5;     // Score mínimo para martingala
-
-// ============= ESTADO GLOBAL =============
-let DOM = {};
-let isSystemReady = false;
-let isVisible = false;
-let isRunning = false;
-
-// Configuración (se carga desde storage)
-let config = {
-  autoTrade: false,
-  useMartingale: false,
-  invertTrade: false,
-  useConfirmation: false,
-  operateOnNext: false,
-  riskPct: 1,
-  mgMaxSteps: 3,
-  mgFactor: 2.0,
-  entrySec: 57,           // Segundo de entrada (57 = 3 segundos antes del cierre)
-  entryWindowSec: 3,      // Duración de la ventana de entrada en segundos
-  timeOffset: 0,
-  useChartData: true, // NUEVO: Usar datos del gráfico cuando estén disponibles
-  stopConfig: {
-    useTime: false,
-    timeMin: 0,
-    useRisk: false,
-    profitPct: 0,
-    stopLossPct: 0,
-    useTrades: false,
-    maxWins: 0,
-    maxLosses: 0
-  }
-};
-
-// Estado de trading
-let balance = 0;
-let lastLoggedBalance = 0; // Para evitar loguear el mismo saldo repetidamente
-let balanceLoaded = false; // Flag para indicar que el saldo ya fue cargado
-let isDemo = true;
-let currentAmt = 0;
-let mgLevel = 0;
-let candles = [];
-let chartCandles = []; // NUEVO: Velas obtenidas directamente del gráfico
-let currentCandle = null;
-let currentPair = '';
-let pendingTrades = [];
-let processed = 0;
-let tradeExecutedThisCandle = false;
-let lastTradeType = null;
-let activeMartingaleTrade = null;
-let pendingSignal = null;
-let stats = { w: 0, l: 0 };
-let sessionStats = { w: 0, l: 0 };
-let startTime = 0;
-let initialBalance = 0;
-let lastTickTime = 0;
-let wsConnected = false;
-let lastWsData = null;
-let lastTradeTime = 0;             // Timestamp del último trade ejecutado
-let consecutiveLosses = 0;         // Contador de pérdidas consecutivas
-const MIN_TRADE_INTERVAL = 5000;   // Mínimo 5 segundos entre trades
-const MAX_CONSECUTIVE_LOSSES = 5;  // Máximo de pérdidas consecutivas antes de pausa
-
-// NUEVO: Estado del acceso al gráfico
-let chartAccessMethod = 'none'; // 'tradingview', 'zustand', 'api', 'websocket'
-let tvWidgetRef = null;
-let chartSyncInterval = null;
-let lastChartSync = 0;
-
-// ============= NUEVO V12: SISTEMA DE WARMUP =============
-let systemWarmupLevel = 0;         // 0-100% de preparación
-let isSystemWarmedUp = false;      // True cuando está al 100%
-
-// ============= NUEVO V12: INDICADORES TÉCNICOS =============
-let emaFast = null;                // EMA 8
-let emaSlow = null;                // EMA 21
-let atrValue = null;               // ATR 14
-let atrAverage = null;             // Promedio de ATR para comparar volatilidad
-let currentTrend = 'neutral';      // 'bullish', 'bearish', 'neutral'
-let volatilityLevel = 'normal';    // 'low', 'normal', 'high'
-
-// ============= NUEVO V12: WEBSOCKET ROBUSTO =============
-let wsReconnectAttempt = 0;
-let activeWebSocket = null;
-let wsHeartbeatInterval = null;
-let lastWsMessageTime = 0;
-
-// ============= NUEVO V12: MONITOR DE TRADE EN TIEMPO REAL =============
-let activeTradeMonitor = null;     // Trade activo siendo monitoreado
-let tradeProgressData = [];        // Historial de precios durante el trade
-
-// Intervalos
-let tickerInterval = null;
-let sessionInterval = null;
-let healthCheckInterval = null;
-let warmupInterval = null;
-
-// ============= NUEVO: ACCESO AL GRÁFICO =============
-
-/**
- * Intenta obtener referencia al widget de TradingView
- * El widget está disponible en window.tvWidget cuando el gráfico está cargado
- */
-function getTradingViewWidget() {
-  try {
-    // Método 1: Acceso directo al widget global
-    if (window.tvWidget && typeof window.tvWidget.activeChart === 'function') {
-      return window.tvWidget;
-    }
-    
-    // Método 2: Buscar en el iframe del gráfico
-    const chartContainer = document.querySelector('#chartContainer');
-    if (chartContainer) {
-      const iframe = chartContainer.querySelector('iframe');
-      if (iframe && iframe.contentWindow) {
-        try {
-          if (iframe.contentWindow.tvWidget) {
-            return iframe.contentWindow.tvWidget;
-          }
-        } catch (e) {
-          // Restricción cross-origin, intentar otro método
-        }
-      }
-    }
-    
-    // Método 3: Buscar TVWidget en cualquier iframe
-    const iframes = document.querySelectorAll('iframe');
-    for (const iframe of iframes) {
-      try {
-        if (iframe.contentWindow && iframe.contentWindow.tvWidget) {
-          return iframe.contentWindow.tvWidget;
-        }
-      } catch (e) {
-        // Continuar con el siguiente iframe
-      }
-    }
-  } catch (e) {
-    console.log('[SNIPER] TradingView widget no accesible:', e.message);
-  }
-  return null;
-}
-
-/**
- * Obtiene las velas del gráfico de TradingView
- * Retorna un array de velas en formato {s, o, h, l, c, v}
- */
-function getCandlesFromTradingView() {
-  try {
-    const widget = getTradingViewWidget();
-    if (!widget) return null;
-    
-    const chart = widget.activeChart();
-    if (!chart) return null;
-    
-    // Intentar obtener datos del gráfico
-    // TradingView expone los datos a través de diferentes métodos
-    
-    // Método 1: exportData (si está disponible)
-    if (typeof chart.exportData === 'function') {
-      return new Promise((resolve) => {
-        chart.exportData({
-          from: Date.now() - (MAX_CANDLES * 60 * 1000),
-          to: Date.now()
-        }).then(data => {
-          if (data && data.data && Array.isArray(data.data)) {
-            const candles = data.data.map(bar => ({
-              s: bar.time * 1000, // TradingView usa segundos, convertir a ms
-              o: bar.open,
-              h: bar.high,
-              l: bar.low,
-              c: bar.close,
-              v: bar.volume || 0
-            }));
-            resolve(candles);
-          } else {
-            resolve(null);
-          }
-        }).catch(() => resolve(null));
-      });
-    }
-    
-    // Método 2: Obtener series visibles
-    if (typeof chart.getAllStudies === 'function') {
-      // Las series principales contienen los datos OHLC
-      const series = chart.getAllStudies();
-      // Procesar series...
-    }
-    
-    return null;
-  } catch (e) {
-    console.log('[SNIPER] Error obteniendo velas de TradingView:', e.message);
-    return null;
-  }
-}
-
-/**
- * Obtiene velas desde el store de Zustand (chart-storage)
- */
-function getCandlesFromZustand() {
-  try {
-    // Los stores de Zustand persisten en localStorage
-    const chartStore = localStorage.getItem('chart-storage');
-    if (chartStore) {
-      const parsed = JSON.parse(chartStore);
-      // El store puede tener datos de velas en caché
-      if (parsed.state && parsed.state.candles) {
-        return parsed.state.candles;
-      }
-    }
-  } catch (e) {
-    // No hay datos en el store
-  }
-  return null;
-}
-
-/**
- * Sincroniza las velas del bot con las del gráfico
- * Prioriza fuentes: TradingView > Zustand > API > WebSocket
- */
-async function syncWithChart() {
-  if (!isRunning || !config.useChartData) return;
-  
-  const now = Date.now();
-  if (now - lastChartSync < CHART_SYNC_INTERVAL) return;
-  lastChartSync = now;
-  
-  // Intentar obtener velas de diferentes fuentes
-  let newCandles = null;
-  let method = 'none';
-  
-  // 1. Intentar TradingView Widget
-  const tvCandles = await getCandlesFromTradingView();
-  if (tvCandles && tvCandles.length > 0) {
-    newCandles = tvCandles;
-    method = 'tradingview';
-  }
-  
-  // 2. Intentar Zustand Store
-  if (!newCandles) {
-    const zustandCandles = getCandlesFromZustand();
-    if (zustandCandles && zustandCandles.length > 0) {
-      newCandles = zustandCandles;
-      method = 'zustand';
-    }
-  }
-  
-  // 3. Si no hay acceso directo, usar datos del WebSocket
-  if (!newCandles && candles.length > 0) {
-    method = 'websocket';
-  }
-  
-  // Actualizar método de acceso si cambió
-  if (method !== chartAccessMethod) {
-    chartAccessMethod = method;
-    if (method !== 'websocket' && method !== 'none') {
-      logMonitor(`Fuente de datos: ${method.toUpperCase()}`, 'success');
-    }
-  }
-  
-  // Si obtuvimos velas del gráfico, actualizar chartCandles
-  if (newCandles && newCandles.length > 0) {
-    chartCandles = newCandles.slice(-MAX_CANDLES);
-  }
-}
-
-/**
- * Obtiene las velas más confiables para análisis
- * Compara velas del gráfico con las construidas desde WebSocket
- */
-function getAnalysisCandles() {
-  // Si tenemos velas del gráfico y están actualizadas, usarlas
-  if (config.useChartData && chartCandles.length > 0) {
-    const chartLastTime = chartCandles[chartCandles.length - 1]?.s || 0;
-    const wsLastTime = candles[candles.length - 1]?.s || 0;
-    
-    // Si las velas del gráfico son recientes (menos de 2 minutos de diferencia), usarlas
-    if (Math.abs(chartLastTime - wsLastTime) < 120000) {
-      return chartCandles;
-    }
-  }
-  
-  // Por defecto, usar las velas construidas desde WebSocket
-  return candles;
-}
-
-/**
- * Valida que una vela esté completamente cerrada
- */
-function isCandleClosed(candle, currentTime) {
-  if (!candle || !candle.s) return false;
-  const candleEndTime = candle.s + 60000; // Vela de 1 minuto
-  return currentTime >= candleEndTime;
-}
-
-// ============= WORBIT STORE ACCESS =============
-function getWorbitCredentials() {
-  let credentials = null;
-  
-  // Método 1: Buscar en localStorage (setting-store de Zustand)
-  try {
-    const settingStore = localStorage.getItem('setting-store');
-    if (settingStore) {
-      const parsed = JSON.parse(settingStore);
-      if (parsed.state && parsed.state.otcApiUrl && parsed.state.otcApiKey) {
-        credentials = {
-          otcApiUrl: parsed.state.otcApiUrl,
-          otcApiKey: parsed.state.otcApiKey,
-          otcWsUrl: parsed.state.otcWsUrl
-        };
-      }
-    }
-  } catch (e) {}
-  
-  // Método 2: Buscar en el iframe del gráfico (parámetros de URL)
-  if (!credentials || !credentials.otcApiUrl) {
-    try {
-      const chartFrame = document.querySelector('iframe[src*="chart"]') || 
-                         document.querySelector('iframe[src*="symbolApiUrl"]');
-      if (chartFrame && chartFrame.src) {
-        const url = new URL(chartFrame.src);
-        const apiUrl = url.searchParams.get('symbolApiUrl');
-        const apiKey = url.searchParams.get('symbolApiKey');
-        const wsUrl = url.searchParams.get('symbolWsUrl');
-        
-        if (apiUrl && apiKey) {
-          credentials = {
-            otcApiUrl: apiUrl,
-            otcApiKey: apiKey,
-            otcWsUrl: wsUrl
-          };
-        }
-      }
-    } catch (e) {}
-  }
-  
-  // Método 3: Buscar iframes y extraer de su contenido
-  if (!credentials || !credentials.otcApiUrl) {
-    try {
-      const iframes = document.querySelectorAll('iframe');
-      for (const iframe of iframes) {
-        if (iframe.src && iframe.src.includes('symbolApiUrl')) {
-          const url = new URL(iframe.src);
-          const apiUrl = url.searchParams.get('symbolApiUrl');
-          const apiKey = url.searchParams.get('symbolApiKey');
-          const wsUrl = url.searchParams.get('symbolWsUrl');
-          
-          if (apiUrl && apiKey) {
-            credentials = {
-              otcApiUrl: apiUrl,
-              otcApiKey: apiKey,
-              otcWsUrl: wsUrl
-            };
-            break;
-          }
-        }
-      }
-    } catch (e) {}
-  }
-  
-  // Método 4: Buscar en window.__NUXT__ o variables globales comunes
-  if (!credentials || !credentials.otcApiUrl) {
-    try {
-      if (window.__CONFIG__ && window.__CONFIG__.otcApiUrl) {
-        credentials = {
-          otcApiUrl: window.__CONFIG__.otcApiUrl,
-          otcApiKey: window.__CONFIG__.otcApiKey,
-          otcWsUrl: window.__CONFIG__.otcWsUrl
-        };
-      }
-    } catch (e) {}
-  }
-  
-  return credentials;
-}
-
-function getSelectedSymbol() {
-  try {
-    const symbolStore = localStorage.getItem('symbol-store');
-    if (symbolStore) {
-      const parsed = JSON.parse(symbolStore);
-      if (parsed.state && parsed.state.symbolSelected) {
-        return parsed.state.symbolSelected;
-      }
-    }
-  } catch (e) {}
-  return null;
-}
-
-// ============= WEBSOCKET INTERCEPTOR MEJORADO V12 =============
-let originalWebSocket = null;
-let wsReconnectTimeout = null;
-let lastWsUrl = null;
-let lastWsProtocols = null;
-
-function setupWebSocketInterceptor() {
-  if (originalWebSocket) return;
-
-  originalWebSocket = window.WebSocket;
-
-  window.WebSocket = function(url, protocols) {
-    const ws = new originalWebSocket(url, protocols);
-
-    // V12: Guardar URL y protocolos para reconexión
-    if (url.includes('symbol-prices')) {
-      lastWsUrl = url;
-      lastWsProtocols = protocols;
-      activeWebSocket = ws;
-    }
-
-    ws.addEventListener('open', () => {
-      if (url.includes('symbol-prices')) {
-        wsConnected = true;
-        lastTickTime = Date.now();
-        lastWsMessageTime = Date.now();
-        wsReconnectAttempt = 0; // V12: Resetear contador de intentos
-        logMonitor('✓ WebSocket conectado', 'success');
-        updateConnectionUI(true);
-        startWsHeartbeat(); // V12: Iniciar monitoreo de heartbeat
-      }
-    });
-
-    ws.addEventListener('close', (event) => {
-      if (url.includes('symbol-prices')) {
-        wsConnected = false;
-        activeWebSocket = null;
-        logMonitor(`⚠ WebSocket cerrado (${event.code})`, 'blocked');
-        updateConnectionUI(false);
-        scheduleReconnect(); // V12: Reconexión instantánea
-      }
-    });
-
-    ws.addEventListener('error', () => {
-      if (url.includes('symbol-prices')) {
-        logMonitor('⚠ Error WebSocket', 'blocked');
-        updateConnectionUI(false);
-      }
-    });
-
-    ws.addEventListener('message', (event) => {
-      lastWsMessageTime = Date.now(); // V12: Actualizar timestamp de último mensaje
-      processWebSocketMessage(event.data);
-    });
-
-    return ws;
-  };
-
-  window.WebSocket.prototype = originalWebSocket.prototype;
-  Object.keys(originalWebSocket).forEach(key => {
-    if (key !== 'prototype') {
-      try { window.WebSocket[key] = originalWebSocket[key]; } catch(e) {}
-    }
-  });
-
-  // V12: Iniciar monitoreo de health del WebSocket
-  setInterval(checkWsHealth, 3000);
-}
-
-/**
- * V12: Monitorea la salud del WebSocket y detecta conexiones zombies
- */
-function checkWsHealth() {
-  if (!isRunning || !wsConnected) return;
-
-  const timeSinceLastMessage = Date.now() - lastWsMessageTime;
-
-  // Si no hay mensajes en 10 segundos, la conexión puede estar muerta
-  if (timeSinceLastMessage > 10000) {
-    logMonitor('⚠ WebSocket sin datos - Verificando...', 'info');
-
-    // Si el WebSocket existe pero no envía datos, cerrarlo y reconectar
-    if (activeWebSocket && activeWebSocket.readyState === WebSocket.OPEN) {
-      logMonitor('Forzando reconexión...', 'info');
-      try {
-        activeWebSocket.close();
-      } catch (e) {}
-    }
-  }
-}
-
-/**
- * V12: Inicia el heartbeat del WebSocket para detectar desconexiones rápidamente
- */
-function startWsHeartbeat() {
-  if (wsHeartbeatInterval) clearInterval(wsHeartbeatInterval);
-
-  wsHeartbeatInterval = setInterval(() => {
-    if (!wsConnected || !activeWebSocket) return;
-
-    // Verificar si el WebSocket sigue abierto
-    if (activeWebSocket.readyState !== WebSocket.OPEN) {
-      wsConnected = false;
-      updateConnectionUI(false);
-      scheduleReconnect();
-    }
-  }, 1000);
-}
-
-function processWebSocketMessage(data) {
-  if (typeof data !== 'string' || !data.includes('symbol.price.update')) return;
-  
-  try {
-    const startIdx = data.indexOf('[');
-    if (startIdx === -1) return;
-    
-    const json = JSON.parse(data.substring(startIdx));
-    if (!Array.isArray(json) || json.length < 2) return;
-    
-    const payload = json[1];
-    if (!payload || payload.event !== 'symbol.price.update') return;
-    
-    const priceData = payload.data;
-    if (!priceData || !priceData.closePrice) return;
-    
-    wsConnected = true;
-    lastTickTime = Date.now();
-    
-    lastWsData = {
-      closePrice: parseFloat(priceData.closePrice),
-      openPrice: parseFloat(priceData.openPrice || priceData.closePrice),
-      highPrice: parseFloat(priceData.highPrice || priceData.closePrice),
-      lowPrice: parseFloat(priceData.lowPrice || priceData.closePrice),
-      time: priceData.time || Date.now(),
-      pair: priceData.pair,
-      volume: parseFloat(priceData.volume || 0)
-    };
-    
-    if (isSystemReady && isRunning) {
-      onTick(lastWsData);
-    }
-    
-    window.postMessage({ type: 'SNIPER_WS_DATA', data: lastWsData }, '*');
-  } catch (e) {}
-}
-
-/**
- * V12: Sistema de reconexión instantánea con backoff exponencial
- * No recarga la página, crea una nueva conexión WebSocket directamente
- */
-function scheduleReconnect() {
-  if (wsReconnectTimeout) return;
-  if (!isRunning) return;
-
-  // Determinar delay basado en el intento actual
-  const delayIndex = Math.min(wsReconnectAttempt, WS_RECONNECT_DELAYS.length - 1);
-  const delay = WS_RECONNECT_DELAYS[delayIndex];
-
-  wsReconnectTimeout = setTimeout(() => {
-    wsReconnectTimeout = null;
-    if (wsConnected) {
-      wsReconnectAttempt = 0;
-      return;
-    }
-
-    wsReconnectAttempt++;
-    logMonitor(`🔄 Reconectando (${wsReconnectAttempt}/${WS_MAX_RECONNECT_ATTEMPTS})...`, 'info');
-
-    // Si excedemos el máximo de intentos, usar método de fallback
-    if (wsReconnectAttempt > WS_MAX_RECONNECT_ATTEMPTS) {
-      logMonitor('⚠ Máximo de intentos - Recargando gráfico...', 'blocked');
-      wsReconnectAttempt = 0;
-      forceChartReconnect();
-      return;
-    }
-
-    // V12: Intentar reconexión directa sin recargar página
-    attemptDirectReconnect();
-
-  }, delay);
-}
-
-/**
- * V12: Intenta reconectar directamente creando un nuevo WebSocket
- */
-function attemptDirectReconnect() {
-  // Método 1: Si tenemos la URL guardada, intentar reconectar directamente
-  if (lastWsUrl && originalWebSocket) {
-    try {
-      logMonitor('Intentando conexión directa...', 'info');
-      const newWs = new window.WebSocket(lastWsUrl, lastWsProtocols);
-      // El interceptor manejará la conexión automáticamente
-      return;
-    } catch (e) {
-      logMonitor('Conexión directa fallida', 'blocked');
-    }
-  }
-
-  // Método 2: Forzar reconexión del socket.io subyacente
-  try {
-    const socketManager = window.__SOCKET_MANAGER__ || window.io?.Manager?._managers;
-    if (socketManager) {
-      Object.values(socketManager).forEach(manager => {
-        if (manager?.engine?.close) {
-          manager.engine.close();
-          setTimeout(() => manager.open?.(), 100);
-        }
-      });
-      return;
-    }
-  } catch (e) {}
-
-  // Método 3: Disparar evento de visibilidad para forzar reconexión
-  try {
-    document.dispatchEvent(new Event('visibilitychange'));
-  } catch (e) {}
-
-  // Si nada funciona, programar otro intento
-  if (wsReconnectAttempt < WS_MAX_RECONNECT_ATTEMPTS) {
-    scheduleReconnect();
-  }
-}
-
-/**
- * V12: Método de fallback - recarga el iframe del gráfico
- */
-function forceChartReconnect() {
-  const chartFrame = document.querySelector('iframe[src*="chart"]');
-  if (chartFrame) {
-    try {
-      chartFrame.contentWindow.location.reload();
-    } catch(e) {
-      // Si no podemos recargar el iframe, intentar recrearlo
-      const parent = chartFrame.parentNode;
-      const src = chartFrame.src;
-      chartFrame.remove();
-      const newFrame = document.createElement('iframe');
-      newFrame.src = src;
-      newFrame.style.cssText = chartFrame.style.cssText;
-      parent?.appendChild(newFrame);
-    }
-  }
-}
-
-function updateConnectionUI(connected) {
-  if (DOM.dot) {
-    DOM.dot.style.background = connected ? '#00e676' : '#e74c3c';
-    DOM.dot.style.boxShadow = connected ? '0 0 8px #00e676' : '0 0 8px #e74c3c';
-  }
-}
-
-// ============= CARGA DE DATOS HISTÓRICOS =============
-async function loadHistoricalData(pair) {
-  const credentials = getWorbitCredentials();
-  
-  if (!credentials?.otcApiUrl || !credentials?.otcApiKey) {
-    logMonitor('Sin API histórica - modo live', 'info');
-    return [];
-  }
-  
-  const symbol = getSelectedSymbol();
-  const slot = symbol?.slot || 'mybroker-11';
-  const type = symbol?.type || 'otc';
-  const ticker = pair || symbol?.ticker;
-  
-  if (!ticker) {
-    logMonitor('Sin símbolo para histórico', 'info');
-    return [];
-  }
-  
-  const endTime = Date.now();
-  const startTimeMs = endTime - (2 * 60 * 60 * 1000);
-  
-  try {
-    logMonitor('Cargando histórico...', 'info');
-    
-    const url = `${credentials.otcApiUrl}/aggregated-prices/prices`;
-    const params = new URLSearchParams({
-      slot, pair: ticker, startTime: startTimeMs.toString(),
-      endTime: endTime.toString(), type, interval: '1m', limit: '200'
-    });
-    
-    const response = await fetch(`${url}?${params}`, {
-      headers: { 'api-key': credentials.otcApiKey }
-    });
-    
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    
-    const data = await response.json();
-    
-    if (Array.isArray(data) && data.length > 0) {
-      const loadedCandles = data.map(d => ({
-        s: parseInt(d.time),
-        o: parseFloat(d.openPrice),
-        h: parseFloat(d.highPrice),
-        l: parseFloat(d.lowPrice),
-        c: parseFloat(d.closePrice),
-        v: parseFloat(d.volume || 0)
-      })).sort((a, b) => a.s - b.s);
-      
-      logMonitor(`${loadedCandles.length} velas cargadas`, 'success');
-      chartAccessMethod = 'api';
-      return loadedCandles;
-    }
-    return [];
-  } catch (e) {
-    logMonitor(`Histórico no disponible`, 'info');
-    return [];
-  }
-}
-
-// ============= PERSISTENCIA DE CONFIGURACIÓN =============
-function saveConfigToStorage() {
-  const configToSave = {
-    autoTrade: config.autoTrade,
-    useMartingale: config.useMartingale,
-    invertTrade: config.invertTrade,
-    useConfirmation: config.useConfirmation,
-    operateOnNext: config.operateOnNext,
-    riskPct: config.riskPct,
-    mgMaxSteps: config.mgMaxSteps,
-    mgFactor: config.mgFactor,
-    entrySec: config.entrySec,
-    entryWindowSec: config.entryWindowSec,
-    timeOffset: config.timeOffset,
-    useChartData: config.useChartData,
-    stopConfig: config.stopConfig
-  };
-  window.postMessage({ type: 'SNIPER_SAVE_CONFIG', data: configToSave }, '*');
-}
-
-function loadConfigFromStorage() {
-  window.postMessage({ type: 'SNIPER_LOAD_CONFIG' }, '*');
-}
-
-window.addEventListener('message', (event) => {
-  if (event.source !== window) return;
-  
-  if (event.data.type === 'SNIPER_CONFIG_LOADED' && event.data.config) {
-    const c = event.data.config;
-    config = { ...config, ...c };
-    applyConfigToUI();
-    logMonitor('Configuración restaurada', 'info');
-  }
-});
-
-function applyConfigToUI() {
-  if (!DOM.swAuto) return;
-
-  // Switches principales
-  DOM.swAuto.classList.toggle('active', config.autoTrade);
-  DOM.swMg.classList.toggle('active', config.useMartingale);
-  DOM.swInv.classList.toggle('active', config.invertTrade);
-  if (DOM.swConfirm) DOM.swConfirm.classList.toggle('active', config.useConfirmation);
-  if (DOM.swNext) DOM.swNext.classList.toggle('active', config.operateOnNext);
-  if (DOM.swChart) DOM.swChart.classList.toggle('active', config.useChartData);
-
-  // Inputs numéricos
-  if (DOM.riskPct) DOM.riskPct.value = config.riskPct;
-  if (DOM.mgSteps) DOM.mgSteps.value = config.mgMaxSteps;
-  if (DOM.mgFactor) DOM.mgFactor.value = config.mgFactor;
-  if (DOM.entrySec) DOM.entrySec.value = config.entrySec;
-  if (DOM.timerDelay) DOM.timerDelay.value = config.timeOffset;
-  if (DOM.mgBox) DOM.mgBox.style.display = config.useMartingale ? 'block' : 'none';
-
-  // Stop Config
-  if (config.stopConfig) {
-    if (DOM.swTime) DOM.swTime.classList.toggle('active', config.stopConfig.useTime);
-    if (DOM.swRisk) DOM.swRisk.classList.toggle('active', config.stopConfig.useRisk);
-    if (DOM.swTrades) DOM.swTrades.classList.toggle('active', config.stopConfig.useTrades);
-    if (DOM.sessionTime) DOM.sessionTime.value = config.stopConfig.timeMin || 60;
-    if (DOM.profitTarget) DOM.profitTarget.value = config.stopConfig.profitPct || 10;
-    if (DOM.stopLoss) DOM.stopLoss.value = config.stopConfig.stopLossPct || 10;
-    if (DOM.maxWins) DOM.maxWins.value = config.stopConfig.maxWins || 5;
-    if (DOM.maxLosses) DOM.maxLosses.value = config.stopConfig.maxLosses || 3;
-
-    if (DOM.grpTime) DOM.grpTime.classList.toggle('disabled-group', !config.stopConfig.useTime);
-    if (DOM.grpRisk) DOM.grpRisk.classList.toggle('disabled-group', !config.stopConfig.useRisk);
-    if (DOM.grpTrades) DOM.grpTrades.classList.toggle('disabled-group', !config.stopConfig.useTrades);
-  }
-}
-
-// ============= FUNCIONES DE PRICE ACTION =============
-const getBody = c => Math.abs(c.c - c.o);
-const getUpperWick = c => c.h - Math.max(c.o, c.c);
-const getLowerWick = c => Math.min(c.o, c.c) - c.l;
-const isGreen = c => c.c > c.o;
-const isRed = c => c.c < c.o;
-const getAvgBody = (arr, count = 10) => {
-  if (arr.length < count) return 0;
-  return arr.slice(-count).reduce((a, c) => a + getBody(c), 0) / count;
-};
-
-function getLevels(arr, index) {
-  const supports = [], resistances = [];
-  const lookback = Math.min(index, 50);
-  const start = Math.max(0, index - lookback);
-  
-  for (let i = start + 2; i < index - 2; i++) {
-    const c = arr[i];
-    if (c.h > arr[i-1].h && c.h > arr[i-2].h && c.h > arr[i+1].h && c.h > arr[i+2].h) {
-      resistances.push(c.h);
-    }
-    if (c.l < arr[i-1].l && c.l < arr[i-2].l && c.l < arr[i+1].l && c.l < arr[i+2].l) {
-      supports.push(c.l);
-    }
-  }
-  return { supports, resistances };
-}
-
-function isNearLevel(price, levels, threshold = 0.0002) {
-  return levels.some(lvl => Math.abs(price - lvl) < (price * threshold));
-}
-
-function isPinBar(c, type) {
-  const body = getBody(c);
-  const upper = getUpperWick(c);
-  const lower = getLowerWick(c);
-  if (type === 'bullish') return lower > (body * 2) && upper < body;
-  if (type === 'bearish') return upper > (body * 2) && lower < body;
-  return false;
-}
-
-function isEngulfing(curr, prev, type) {
-  if (type === 'bullish') return isRed(prev) && isGreen(curr) && curr.c > prev.o && curr.o < prev.c;
-  if (type === 'bearish') return isGreen(prev) && isRed(curr) && curr.c < prev.o && curr.o > prev.c;
-  return false;
-}
-
-function isExhaustion(c, type) {
-  const body = getBody(c);
-  const upper = getUpperWick(c);
-  const lower = getLowerWick(c);
-  if (type === 'bullish') return lower > (body * 3);
-  if (type === 'bearish') return upper > (body * 3);
-  return false;
-}
-
-function isStrongMomentum(arr, type) {
-  if (arr.length < 5) return false;
-  const last = arr[arr.length - 1];
-  const prev = arr[arr.length - 2];
-  const prev2 = arr[arr.length - 3];
-  const avgBody = getAvgBody(arr);
-
-  if (type === 'bearish') {
-    return isRed(last) && isRed(prev) && isRed(prev2) && getBody(last) > avgBody;
-  }
-  if (type === 'bullish') {
-    return isGreen(last) && isGreen(prev) && isGreen(prev2) && getBody(last) > avgBody;
-  }
-  return false;
-}
-
-// ============= NUEVO V12: CÁLCULO DE INDICADORES TÉCNICOS =============
-
-/**
- * Calcula EMA (Exponential Moving Average)
- * @param {Array} candles - Array de velas
- * @param {number} period - Período de la EMA
- * @returns {number|null} - Valor de EMA o null si no hay suficientes datos
- */
-function calculateEMA(candles, period) {
-  if (!candles || candles.length < period) return null;
-
-  const k = 2 / (period + 1);
-  let ema = candles[0].c; // Iniciar con el primer cierre
-
-  for (let i = 1; i < candles.length; i++) {
-    ema = candles[i].c * k + ema * (1 - k);
-  }
-
-  return ema;
-}
-
-/**
- * Calcula ATR (Average True Range)
- * @param {Array} candles - Array de velas
- * @param {number} period - Período del ATR (default 14)
- * @returns {number|null} - Valor de ATR o null si no hay suficientes datos
- */
-function calculateATR(candles, period = ATR_PERIOD) {
-  if (!candles || candles.length < period + 1) return null;
-
-  const trueRanges = [];
-
-  for (let i = 1; i < candles.length; i++) {
-    const curr = candles[i];
-    const prev = candles[i - 1];
-
-    const tr1 = curr.h - curr.l;                    // High - Low
-    const tr2 = Math.abs(curr.h - prev.c);          // |High - Previous Close|
-    const tr3 = Math.abs(curr.l - prev.c);          // |Low - Previous Close|
-
-    trueRanges.push(Math.max(tr1, tr2, tr3));
-  }
-
-  // Calcular promedio de los últimos 'period' true ranges
-  const recentTRs = trueRanges.slice(-period);
-  const atr = recentTRs.reduce((sum, tr) => sum + tr, 0) / recentTRs.length;
-
-  return atr;
-}
-
-/**
- * Actualiza todos los indicadores técnicos
- */
-function updateIndicators() {
-  const analysisCandles = getAnalysisCandles();
-
-  if (analysisCandles.length < EMA_SLOW_PERIOD) {
-    emaFast = null;
-    emaSlow = null;
-    atrValue = null;
-    currentTrend = 'neutral';
-    volatilityLevel = 'normal';
-    return;
-  }
-
-  // Calcular EMAs
-  emaFast = calculateEMA(analysisCandles, EMA_FAST_PERIOD);
-  emaSlow = calculateEMA(analysisCandles, EMA_SLOW_PERIOD);
-
-  // Calcular ATR
-  atrValue = calculateATR(analysisCandles);
-
-  // Calcular ATR promedio (para comparar volatilidad)
-  if (analysisCandles.length >= ATR_PERIOD * 2) {
-    const pastCandles = analysisCandles.slice(0, -ATR_PERIOD);
-    atrAverage = calculateATR(pastCandles);
-  }
-
-  // Determinar tendencia basada en EMAs
-  if (emaFast !== null && emaSlow !== null) {
-    const emaDiff = (emaFast - emaSlow) / emaSlow * 100;
-    if (emaDiff > 0.02) {
-      currentTrend = 'bullish';
-    } else if (emaDiff < -0.02) {
-      currentTrend = 'bearish';
-    } else {
-      currentTrend = 'neutral';
-    }
-  }
-
-  // Determinar nivel de volatilidad
-  if (atrValue !== null && atrAverage !== null && atrAverage > 0) {
-    const volRatio = atrValue / atrAverage;
-    if (volRatio < 0.7) {
-      volatilityLevel = 'low';
-    } else if (volRatio > 1.5) {
-      volatilityLevel = 'high';
-    } else {
-      volatilityLevel = 'normal';
-    }
-  }
-}
-
-/**
- * Verifica y actualiza el estado de warmup del sistema
- */
-function checkWarmupStatus() {
-  const analysisCandles = getAnalysisCandles();
-  const candleCount = analysisCandles.length;
-
-  // Calcular nivel de warmup (0-100%)
-  systemWarmupLevel = Math.min(100, Math.round((candleCount / TARGET_CANDLES_FULL) * 100));
-
-  // Sistema está listo cuando tiene suficientes velas para EMA 21
-  const wasWarmedUp = isSystemWarmedUp;
-  isSystemWarmedUp = candleCount >= TARGET_CANDLES_FULL;
-
-  // Log cuando se complete el warmup
-  if (isSystemWarmedUp && !wasWarmedUp) {
-    logMonitor(`✅ Sistema 100% listo (${candleCount} velas)`, 'success');
-  }
-
-  // Actualizar indicadores si hay suficientes datos
-  if (candleCount >= EMA_FAST_PERIOD) {
-    updateIndicators();
-  }
-
-  return isSystemWarmedUp;
-}
-
-/**
- * Calcula el score de una señal (0-10)
- * @param {string} signalType - 'call' o 'put'
- * @param {string} strategy - Nombre de la estrategia que generó la señal
- * @returns {number} - Score de 0 a 10
- */
-function calculateSignalScore(signalType, strategy) {
-  let score = 0;
-
-  // Base: Todas las señales empiezan con 3 puntos
-  score += 3;
-
-  // +2 puntos: Señal alineada con tendencia EMA
-  if (currentTrend === 'bullish' && signalType === 'call') score += 2;
-  if (currentTrend === 'bearish' && signalType === 'put') score += 2;
-
-  // +1 punto: Tendencia neutral (mercado en rango, bueno para reversiones)
-  if (currentTrend === 'neutral') score += 1;
-
-  // +2 puntos: Volatilidad normal (ni muy baja ni muy alta)
-  if (volatilityLevel === 'normal') score += 2;
-  // +1 punto: Volatilidad baja (menos ruido)
-  if (volatilityLevel === 'low') score += 1;
-  // -1 punto: Volatilidad alta (más riesgo)
-  if (volatilityLevel === 'high') score -= 1;
-
-  // +2 puntos: Estrategias de alta probabilidad
-  if (strategy.includes('Rechazo')) score += 2;
-  if (strategy.includes('Engulfing')) score += 1;
-  if (strategy.includes('PinBar')) score += 1;
-
-  // +1 punto: Estrategias de ruptura confirmada
-  if (strategy.includes('Breakout')) score += 1;
-
-  // Verificar confluencia con niveles S/R
-  const analysisCandles = getAnalysisCandles();
-  if (analysisCandles.length >= 10) {
-    const currentPrice = analysisCandles[analysisCandles.length - 1].c;
-    const { supports, resistances } = getLevels(analysisCandles, analysisCandles.length - 1);
-
-    // +1 punto por confluencia con nivel cercano
-    if (signalType === 'call' && isNearLevel(currentPrice, supports, 0.0003)) score += 1;
-    if (signalType === 'put' && isNearLevel(currentPrice, resistances, 0.0003)) score += 1;
-  }
-
-  // Asegurar que el score esté entre 0 y 10
-  return Math.max(0, Math.min(10, score));
-}
-
-/**
- * Evalúa si se debe ejecutar martingala basado en análisis previo
- * @param {string} tradeType - 'call' o 'put'
- * @returns {boolean} - true si se debe ejecutar martingala
- */
-function shouldExecuteMartingale(tradeType) {
-  // Si el sistema no está listo, no ejecutar martingala
-  if (!isSystemWarmedUp) {
-    logMonitor('⏳ Martingala pausada - Sistema en warmup', 'info');
-    return false;
-  }
-
-  // Verificar que la tendencia no esté fuertemente en contra
-  if (currentTrend === 'bullish' && tradeType === 'put') {
-    logMonitor('⚠️ Martingala cancelada - Tendencia alcista contra PUT', 'pattern');
-    return false;
-  }
-  if (currentTrend === 'bearish' && tradeType === 'call') {
-    logMonitor('⚠️ Martingala cancelada - Tendencia bajista contra CALL', 'pattern');
-    return false;
-  }
-
-  // Verificar volatilidad
-  if (volatilityLevel === 'high') {
-    logMonitor('⚠️ Martingala pausada - Alta volatilidad', 'pattern');
-    return false;
-  }
-
-  // Calcular score mínimo para martingala
-  const score = calculateSignalScore(tradeType, 'Martingala');
-  if (score < MIN_SCORE_MARTINGALE) {
-    logMonitor(`⚠️ Martingala cancelada - Score ${score}/${MIN_SCORE_MARTINGALE}`, 'pattern');
-    return false;
-  }
-
-  return true;
-}
-
-/**
- * Obtiene el precio actual del mercado
- * @returns {number|null} - Precio actual o null
- */
-function getCurrentPrice() {
-  // Primero intentar del WebSocket
-  if (lastWsData && lastWsData.closePrice) {
-    return lastWsData.closePrice;
-  }
-
-  // Luego de la vela actual
-  if (currentCandle && currentCandle.c) {
-    return currentCandle.c;
-  }
-
-  // Finalmente de las velas del gráfico
-  const analysisCandles = getAnalysisCandles();
-  if (analysisCandles.length > 0) {
-    return analysisCandles[analysisCandles.length - 1].c;
-  }
-
-  return null;
-}
-
-// ============= DETECCIÓN DE SEÑALES (MEJORADA V12) =============
-function detectSignal(liveCandle) {
-  // V12: Verificar estado de warmup
-  checkWarmupStatus();
-
-  // V12: No operar si el sistema no está 100% listo
-  if (!isSystemWarmedUp) {
-    // Actualizar UI con estado de warmup (no bloquear análisis)
-    return null;
-  }
-
-  // MEJORADO: Usar velas del gráfico si están disponibles
-  const baseCandles = getAnalysisCandles();
-  const analysisCandles = [...baseCandles];
-
-  // Solo añadir la vela live si estamos analizando en tiempo real
-  if (liveCandle && !config.operateOnNext) {
-    analysisCandles.push(liveCandle);
-  }
-
-  if (analysisCandles.length < 3) return null;
-
-  const i = analysisCandles.length - 1;
-  const now = analysisCandles[i];
-  const prev = analysisCandles[i - 1];
-  const prev2 = analysisCandles[i - 2];
-
-  // MEJORADO: Validar que las velas de análisis estén cerradas (excepto la actual)
-  const currentTime = Date.now();
-  if (!isCandleClosed(prev, currentTime) || !isCandleClosed(prev2, currentTime)) {
-    // Las velas previas no están cerradas, esperar
-    return null;
-  }
-
-  const { supports, resistances } = getLevels(analysisCandles, i);
-  const nearSupport = isNearLevel(now.l, supports);
-  const nearResistance = isNearLevel(now.h, resistances);
-
-  let signal = null;
-  let strategy = '';
-  
-  // S1: Rechazo en niveles
-  if (nearSupport) {
-    if (isPinBar(now, 'bullish')) { signal = 'call'; strategy = 'Rechazo Soporte (PinBar)'; }
-    else if (isEngulfing(now, prev, 'bullish')) { signal = 'call'; strategy = 'Rechazo Soporte (Engulfing)'; }
-  } else if (nearResistance) {
-    if (isPinBar(now, 'bearish')) { signal = 'put'; strategy = 'Rechazo Resistencia (PinBar)'; }
-    else if (isEngulfing(now, prev, 'bearish')) { signal = 'put'; strategy = 'Rechazo Resistencia (Engulfing)'; }
-  }
-  
-  // S2: Falsa ruptura
-  if (!signal) {
-    if (supports.some(s => now.l < s && now.c > s && isRed(prev))) {
-      signal = 'call'; strategy = 'Falsa Ruptura Soporte';
-    } else if (resistances.some(r => now.h > r && now.c < r && isGreen(prev))) {
-      signal = 'put'; strategy = 'Falsa Ruptura Resistencia';
-    }
-  }
-  
-  // S3: Breakout
-  if (!signal) {
-    const avgBody = getAvgBody(baseCandles);
-    const isSmallPrev = getBody(prev) < avgBody * 0.5;
-    const isSmallPrev2 = getBody(prev2) < avgBody * 0.5;
-    if (isSmallPrev && isSmallPrev2) {
-      const isBigNow = getBody(now) > avgBody * 1.5;
-      if (isBigNow && isGreen(now) && getUpperWick(now) < getBody(now) * 0.2) {
-        signal = 'call'; strategy = 'Breakout Alcista';
-      } else if (isBigNow && isRed(now) && getLowerWick(now) < getBody(now) * 0.2) {
-        signal = 'put'; strategy = 'Breakout Bajista';
-      }
-    }
-  }
-  
-  // S4: Agotamiento
-  if (!signal) {
-    const runDown = isRed(prev) && isRed(prev2);
-    const runUp = isGreen(prev) && isGreen(prev2);
-    if (runDown && isExhaustion(now, 'bullish')) {
-      signal = 'call'; strategy = 'Agotamiento Bajista';
-    } else if (runUp && isExhaustion(now, 'bearish')) {
-      signal = 'put'; strategy = 'Agotamiento Alcista';
-    }
-  }
-  
-  if (signal) {
-    // V12: Calcular score de la señal
-    const score = calculateSignalScore(signal, strategy);
-
-    // V12: Filtrar por score mínimo
-    if (score < MIN_SCORE_TO_TRADE) {
-      logMonitor(`⚠️ Señal ${signal.toUpperCase()} rechazada - Score ${score}/${MIN_SCORE_TO_TRADE}`, 'info');
-      return null;
-    }
-
-    let displayType = signal;
-    let note = '';
-    if (config.invertTrade) {
-      displayType = signal === 'call' ? 'put' : 'call';
-      note = ' (INV)';
-    }
-
-    // MEJORADO: Mostrar fuente de datos y score en el log
-    const sourceTag = chartAccessMethod !== 'websocket' ? ` [${chartAccessMethod}]` : '';
-    const trendTag = currentTrend !== 'neutral' ? ` [${currentTrend.toUpperCase()}]` : '';
-    logMonitor(`🚀 ${strategy} → ${displayType.toUpperCase()}${note} | Score: ${score}/10${trendTag}${sourceTag}`, 'pattern');
-
-    return { d: signal, score: score, strategy: strategy };
-  }
-  return null;
-}
-
-// ============= PROCESAMIENTO DE TICKS =============
-function onTick(data) {
-  if (!isRunning) return;
-  
-  updateConnectionUI(true);
-  
-  // MEJORADO: Intentar sincronizar con el gráfico periódicamente
-  syncWithChart();
-  
-  if (DOM.uiPrice) {
-    DOM.uiPrice.textContent = data.closePrice.toFixed(2);
-    DOM.uiPrice.className = currentCandle && data.closePrice > currentCandle.o ? 'live-price price-up' : 'live-price price-down';
-  }
-  if (DOM.uiActive) DOM.uiActive.textContent = data.pair;
-  
-  // Actualizar warmup UI
-  updateWarmupUI();
-  
-  // Cambio de activo
-  if (currentPair !== data.pair) {
-    currentPair = data.pair;
-    candles = [];
-    chartCandles = [];
-    currentCandle = null;
-    pendingTrades = [];
-    processed = 0;
-    chartAccessMethod = 'none';
-    // Contador de velas removido - usar warmup indicator
-// if (DOM.uiCnt) DOM.uiCnt.textContent = `0/${TARGET_CANDLES}`;
-    logMonitor(`Activo: ${currentPair}`, 'info');
-    
-    // Cargar histórico para el nuevo activo
-    loadHistoricalData(currentPair).then(hist => {
-      if (hist.length > 0) {
-        candles = hist;
-        chartCandles = hist.slice(); // Copiar también a chartCandles
-        processed = hist.length;
-        // Contador de velas removido - usar warmup indicator
-// if (DOM.uiCnt) DOM.uiCnt.textContent = `${Math.min(processed, TARGET_CANDLES)}/${TARGET_CANDLES}`;
-      }
-    });
-  }
-  
-  const timestamp = data.time;
-  const candleTime = Math.floor(timestamp / 60000) * 60000;
-  
-  if (!currentCandle) {
-    currentCandle = {
-      s: candleTime, o: data.closePrice, h: data.closePrice,
-      l: data.closePrice, c: data.closePrice, v: data.volume
-    };
-  } else if (timestamp >= currentCandle.s + 60000) {
-    // Cerrar vela
-    candles.push({ ...currentCandle });
-    if (candles.length > MAX_CANDLES) candles.shift();
-    
-    processed++;
-    // Contador de velas removido - usar warmup indicator
-// if (DOM.uiCnt) DOM.uiCnt.textContent = `${Math.min(processed, TARGET_CANDLES)}/${TARGET_CANDLES}`;
-    
-    checkTradeResults(currentCandle);
-    
-    if (config.operateOnNext) {
-      pendingSignal = detectSignal();
-    } else {
-      pendingSignal = null;
-    }
-    
-    tradeExecutedThisCandle = false;
-    lastTradeType = null;
-    
-    currentCandle = {
-      s: candleTime, o: data.closePrice, h: data.closePrice,
-      l: data.closePrice, c: data.closePrice, v: data.volume
-    };
-    
-    // Martingala V12: Verificar condiciones antes de ejecutar
-    if (activeMartingaleTrade && config.useMartingale) {
-      if (shouldExecuteMartingale(activeMartingaleTrade.type)) {
-        logMonitor(`Martingala Nivel ${mgLevel}`, 'info');
-        if (config.autoTrade) executeTrade(activeMartingaleTrade.type);
-        // V12: Guardar precio de entrada real
-        const entryPrice = getCurrentPrice();
-        pendingTrades.push({ k: currentCandle.s, type: activeMartingaleTrade.type, entryPrice: entryPrice });
-        tradeExecutedThisCandle = true;
-        lastTradeType = activeMartingaleTrade.type;
-      } else {
-        // Martingala cancelada por condiciones desfavorables
-        mgLevel = 0;
-        stats.l++;
-        sessionStats.l++;
-        logMonitor('⛔ Martingala cancelada - Condiciones desfavorables', 'blocked');
-      }
-      activeMartingaleTrade = null;
-    }
-  } else {
-    currentCandle.c = data.closePrice;
-    currentCandle.h = Math.max(currentCandle.h, data.closePrice);
-    currentCandle.l = Math.min(currentCandle.l, data.closePrice);
-    currentCandle.v = data.volume;
-    
-    if (!config.operateOnNext) {
-      const signal = detectSignal(currentCandle);
-      pendingSignal = signal || null;
-    }
-  }
-  
-  const now = Date.now() + config.timeOffset;
-  const sec = Math.ceil((60000 - (now % 60000)) / 1000);
-  updateSignalUI(sec, currentCandle.s);
-}
-
-// ============= UI DE SEÑALES (CYBERPUNK STYLE) =============
-function updateSignalUI(sec, key) {
-  if (!DOM.signalBox || !DOM.signalStatus) return;
-
-  // V12: Si el sistema no está listo, mostrar estado de carga
-  if (!isSystemWarmedUp) {
-    DOM.signalBox.className = 'sig-waiting';
-    DOM.signalStatus.innerHTML = `
-      <div class="signal-title" style="color:#ff00ff;font-size:12px">CARGANDO SISTEMA</div>
-      <div class="signal-subtitle" style="color:#00ffff;font-size:9px">Esperando ${TARGET_CANDLES_FULL} velas...</div>`;
-    return;
-  }
-
-  if (tradeExecutedThisCandle) {
-    const isCall = lastTradeType === 'call';
-    DOM.signalBox.className = isCall ? 'sig-possible-call' : 'sig-possible-put';
-    DOM.signalStatus.innerHTML = `
-      <div class="signal-title" style="color:${isCall ? '#00ff88' : '#ff0080'};font-size:14px">${isCall ? '▲ COMPRA' : '▼ VENTA'}</div>
-      <div class="signal-subtitle" style="font-size:10px">ESPERANDO RESULTADO...</div>`;
-    return;
-  }
-
-  if (pendingSignal) {
-    let type = pendingSignal.d;
-    const score = pendingSignal.score || 0;
-    if (config.invertTrade) type = type === 'call' ? 'put' : 'call';
-
-    const isCall = type === 'call';
-    const triggerSec = 60 - config.entrySec;
-    const windowSize = config.entryWindowSec || 3;
-
-    if (sec <= triggerSec && sec > (triggerSec - windowSize)) {
-      DOM.signalBox.className = isCall ? 'sig-entry-call' : 'sig-entry-put';
-      DOM.signalStatus.innerHTML = `
-        <div class="signal-title" style="color:${isCall ? '#00ff88' : '#ff0080'};font-size:16px">${isCall ? '▲▲ COMPRA ▲▲' : '▼▼ VENTA ▼▼'}</div>
-        <div class="entry-countdown" style="color:${isCall ? '#00ff88' : '#ff0080'}">¡¡ ENTRAR AHORA !!</div>
-        <div style="font-size:9px;margin-top:4px;color:#fff">Score: ${score}/10 | ${currentTrend.toUpperCase()}</div>`;
-
-      if (!tradeExecutedThisCandle) {
-        tradeExecutedThisCandle = true;
-        lastTradeType = type;
-        const tKey = key + 60000;
-        if (!pendingTrades.some(t => t.k === tKey)) {
-          const entryPrice = getCurrentPrice();
-          pendingTrades.push({ k: tKey, type: type, entryPrice: entryPrice });
-          if (config.autoTrade) executeTrade(type);
-          else logMonitor(`Señal manual: ${type.toUpperCase()} @ ${entryPrice}`, 'success');
-        }
-      }
-    } else {
-      DOM.signalBox.className = 'sig-anticipation';
-      DOM.signalStatus.innerHTML = `
-        <div class="anticipation-badge" style="color:${isCall ? '#00ff88' : '#ff0080'};padding:4px 10px">
-          PREPARAR ${isCall ? '▲ CALL' : '▼ PUT'}
-        </div>
-        <div style="font-size:11px;margin-top:6px;color:#fff">Entrada: <span style="color:#ffff00;font-weight:700">${sec}s</span></div>
-        <div style="font-size:9px;margin-top:2px;color:#aaa">Score: ${score}/10</div>`;
-    }
-  } else {
-    DOM.signalBox.className = 'sig-waiting';
-    DOM.signalStatus.innerHTML = `
-      <div class="signal-title" style="color:#00ffff;font-size:11px">ANALIZANDO MERCADO</div>
-      <div class="signal-subtitle" style="color:#888;font-size:9px">Buscando oportunidades...</div>`;
-  }
-}
-
-// ============= ACTUALIZACIÓN PERIÓDICA DE UI =============
-let uiUpdateInterval = null;
-
-function updateBotUI() {
-  if (!isRunning) {
-    // Bot detenido - mostrar mensaje inicial
-    if (DOM.signalBox && DOM.signalStatus) {
-      DOM.signalBox.className = 'sig-waiting';
-      DOM.signalStatus.innerHTML = `
-        <div class="signal-title" style="color:#00ffff;font-size:11px">INICIAR PARA ANALIZAR</div>
-        <div class="signal-subtitle" style="color:#888;font-size:9px">Presiona el botón para comenzar</div>`;
-    }
-    return;
-  }
-
-  // Bot corriendo - verificar estado de warmup y actualizar UI
-  checkWarmupStatus(); // Actualizar nivel de warmup
-  updateWarmupUI();
-
-  // Actualizar timer
-  const now = Date.now() + config.timeOffset;
-  const sec = Math.ceil((60000 - (now % 60000)) / 1000);
-
-  if (DOM.timerText) {
-    DOM.timerText.textContent = `⏱ Cierre: ${sec}s`;
-  }
-  if (DOM.timerFill) {
-    const pct = ((60 - sec) / 60) * 100;
-    DOM.timerFill.style.width = `${pct}%`;
-    DOM.timerFill.style.background = sec <= 5 ? '#ff0080' : sec <= 15 ? '#ffff00' : '#00ffff';
-  }
-
-  // Actualizar runtime
-  if (DOM.uiRuntime && startTime > 0) {
-    const elapsed = Math.floor((Date.now() - startTime) / 1000);
-    const h = Math.floor(elapsed / 3600);
-    const m = Math.floor((elapsed % 3600) / 60);
-    DOM.uiRuntime.textContent = `${h.toString().padStart(2,'0')}h ${m.toString().padStart(2,'0')}m`;
-  }
-
-  // Actualizar Signal Box basado en estado
-  if (DOM.signalBox && DOM.signalStatus) {
-    if (!isSystemWarmedUp) {
-      // Sistema cargando
-      DOM.signalBox.className = 'sig-waiting';
-      const analysisCandles = getAnalysisCandles();
-      DOM.signalStatus.innerHTML = `
-        <div class="signal-title" style="color:#ff00ff;font-size:12px">CARGANDO SISTEMA</div>
-        <div class="signal-subtitle" style="color:#00ffff;font-size:9px">${systemWarmupLevel}% - ${analysisCandles.length}/${TARGET_CANDLES_FULL} velas</div>`;
-    } else if (tradeExecutedThisCandle) {
-      // Trade en progreso
-      const isCall = lastTradeType === 'call';
-      DOM.signalBox.className = isCall ? 'sig-possible-call' : 'sig-possible-put';
-      DOM.signalStatus.innerHTML = `
-        <div class="signal-title" style="color:${isCall ? '#00ff88' : '#ff0080'};font-size:14px">${isCall ? '▲ COMPRA' : '▼ VENTA'}</div>
-        <div class="signal-subtitle" style="font-size:10px">ESPERANDO RESULTADO...</div>`;
-    } else if (pendingSignal) {
-      // Hay señal pendiente - esto se manejará en updateSignalUI con los segundos correctos
-      // No hacer nada aquí para no sobreescribir
-    } else {
-      // Analizando mercado
-      DOM.signalBox.className = 'sig-waiting';
-      DOM.signalStatus.innerHTML = `
-        <div class="signal-title" style="color:#00ffff;font-size:11px">ANALIZANDO MERCADO</div>
-        <div class="signal-subtitle" style="color:#888;font-size:9px">Buscando oportunidades...</div>`;
-    }
-  }
-}
-
-function startUIUpdateLoop() {
-  if (uiUpdateInterval) clearInterval(uiUpdateInterval);
-  // Actualizar UI cada 500ms para respuesta rápida
-  uiUpdateInterval = setInterval(updateBotUI, 500);
-  // También actualizar inmediatamente
-  updateBotUI();
-}
-
-function stopUIUpdateLoop() {
-  if (uiUpdateInterval) {
-    clearInterval(uiUpdateInterval);
-    uiUpdateInterval = null;
-  }
-  // Actualizar UI una última vez para mostrar estado detenido
-  updateBotUI();
-}
-
-// ============= EJECUCIÓN DE TRADES =============
-function calcAmount() {
-  let base = (balance * config.riskPct) / 100;
-  let multiplier = 1;
-  if (config.useMartingale && mgLevel > 0) {
-    multiplier = Math.pow(config.mgFactor, mgLevel);
-  }
-  currentAmt = Math.max(1, base * multiplier);
-}
-
-function setTradeAmount(targetAmount) {
-  try {
-    const amountInput = document.querySelector('input[type="number"][class*="_input-operator_"]');
-    if (amountInput) {
-      const target = Math.round(targetAmount * 100) / 100;
-      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      nativeInputValueSetter.call(amountInput, target.toFixed(2));
-      amountInput.dispatchEvent(new Event('input', { bubbles: true }));
-      amountInput.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    }
-  } catch (e) {}
-  return false;
-}
-
-function executeTrade(type) {
-  // Validar que autoTrade esté activo
-  if (!config.autoTrade) {
-    logMonitor('AutoTrade desactivado', 'info');
-    return false;
-  }
-
-  // Validar tipo de trade
-  if (type !== 'call' && type !== 'put') {
-    logMonitor(`Tipo de trade inválido: ${type}`, 'blocked');
-    return false;
-  }
-
-  // SEGURIDAD: Validar conexión WebSocket
-  if (!wsConnected) {
-    logMonitor('⚠️ Sin conexión WebSocket - Trade cancelado', 'blocked');
-    return false;
-  }
-
-  // SEGURIDAD: Evitar trades muy rápidos (anti-spam)
-  const now = Date.now();
-  if (now - lastTradeTime < MIN_TRADE_INTERVAL) {
-    const waitTime = Math.ceil((MIN_TRADE_INTERVAL - (now - lastTradeTime)) / 1000);
-    logMonitor(`⏳ Espera ${waitTime}s entre trades`, 'info');
-    return false;
-  }
-
-  // SEGURIDAD: Pausa automática por pérdidas consecutivas
-  if (consecutiveLosses >= MAX_CONSECUTIVE_LOSSES) {
-    logMonitor(`⛔ Pausa automática: ${consecutiveLosses} pérdidas consecutivas`, 'blocked');
-    logMonitor('Desactiva y activa AutoTrade para continuar', 'info');
-    return false;
-  }
-
-  // Validar balance mínimo
-  if (balance <= 0) {
-    logMonitor('Balance insuficiente para operar', 'blocked');
-    return false;
-  }
-
-  // Calcular y configurar monto
-  calcAmount();
-
-  // Validar monto mínimo
-  if (currentAmt < 1) {
-    logMonitor('Monto mínimo es $1.00', 'blocked');
-    currentAmt = 1;
-  }
-
-  // Validar que el monto no exceda el balance
-  if (currentAmt > balance) {
-    logMonitor(`Monto ajustado al balance: $${balance.toFixed(2)}`, 'info');
-    currentAmt = balance;
-  }
-
-  // SEGURIDAD: Advertencia en cuenta real
-  if (!isDemo && currentAmt > balance * 0.1) {
-    logMonitor(`⚠️ CUENTA REAL: Trade de ${((currentAmt/balance)*100).toFixed(1)}% del balance`, 'pattern');
-  }
-
-  // Configurar monto en la UI del broker
-  const amountSet = setTradeAmount(currentAmt);
-  if (!amountSet) {
-    logMonitor('No se pudo configurar el monto', 'blocked');
-  }
-
-  // Actualizar timestamp del último trade
-  lastTradeTime = now;
-
-  logMonitor(`Ejecutando ${type.toUpperCase()} - $${currentAmt.toFixed(2)}`, 'success');
-
-  // Ejecutar el trade con retry logic
-  executeTradeWithRetry(type, 3);
-  return true;
-}
-
-function executeTradeWithRetry(type, maxRetries) {
-  let retries = 0;
-
-  const attemptClick = () => {
-    try {
-      // Selectores para los botones del broker Worbit
-      const selectors = type === 'call'
-        ? ['.buy-button', '[class*="buy"]', 'button:has-text("ARRIBA")']
-        : ['.sell-button', '[class*="sell"]', 'button:has-text("ABAJO")'];
-
-      let targetButton = null;
-
-      // Intentar con cada selector
-      for (const selector of selectors) {
-        try {
-          targetButton = document.querySelector(selector);
-          if (targetButton && !targetButton.disabled) break;
-        } catch (e) {
-          // Selector inválido, continuar con el siguiente
-        }
-      }
-
-      if (targetButton && !targetButton.disabled) {
-        // Agregar pequeño delay aleatorio para parecer más humano
-        const delay = 50 + Math.random() * 100;
-        setTimeout(() => {
-          targetButton.click();
-          logMonitor(`✅ Trade ejecutado: ${type.toUpperCase()}`, 'success');
-        }, delay);
-        return true;
-      } else if (retries < maxRetries) {
-        retries++;
-        logMonitor(`Reintentando click (${retries}/${maxRetries})...`, 'info');
-        setTimeout(attemptClick, 200);
-        return false;
-      } else {
-        logMonitor(`❌ Botón ${type.toUpperCase()} no encontrado después de ${maxRetries} intentos`, 'blocked');
-        return false;
-      }
-    } catch (e) {
-      logMonitor(`❌ Error ejecutando trade: ${e.message}`, 'blocked');
-      return false;
-    }
-  };
-
-  // Iniciar después de un pequeño delay
-  setTimeout(attemptClick, 100);
-}
-
-// ============= VERIFICACIÓN DE RESULTADOS (V12: PRECIO DE ENTRADA REAL) =============
-function checkTradeResults(candle) {
-  const toRemove = [];
-  pendingTrades.forEach((t, i) => {
-    if (t.k === candle.s) {
-      // V12: Usar precio de entrada real en lugar del precio de apertura de la vela
-      const referencePrice = t.entryPrice || candle.o; // Fallback a candle.o para compatibilidad
-
-      const winCall = t.type === 'call' && candle.c > referencePrice;
-      const winPut = t.type === 'put' && candle.c < referencePrice;
-      const isWin = winCall || winPut;
-      const isDraw = candle.c === referencePrice;
-
-      // V12: Log detallado del resultado
-      const priceChange = ((candle.c - referencePrice) / referencePrice * 100).toFixed(4);
-      const direction = candle.c > referencePrice ? '↑' : candle.c < referencePrice ? '↓' : '→';
-
-      if (isWin) {
-        stats.w++;
-        sessionStats.w++;
-        consecutiveLosses = 0;  // Resetear contador de pérdidas consecutivas
-        mgLevel = 0;
-        activeMartingaleTrade = null;
-        logMonitor(`✅ GANADA ${direction}${priceChange}% (${referencePrice.toFixed(2)} → ${candle.c.toFixed(2)})`, 'success');
-      } else if (!isDraw) {
-        consecutiveLosses++;  // Incrementar contador de pérdidas consecutivas
-        if (config.useMartingale) {
-          const stopLossTrigger = (t.type === 'call' && isStrongMomentum(candles, 'bearish')) ||
-                                  (t.type === 'put' && isStrongMomentum(candles, 'bullish'));
-          if (stopLossTrigger) {
-            stats.l++;
-            sessionStats.l++;
-            mgLevel = 0;
-            activeMartingaleTrade = null;
-            logMonitor(`⛔ Momentum en contra - Stop ${direction}${priceChange}%`, 'blocked');
-          } else if (mgLevel < config.mgMaxSteps) {
-            mgLevel++;
-            activeMartingaleTrade = { type: t.type };
-            logMonitor(`❌ PERDIDA ${direction}${priceChange}% - Martingala ${mgLevel}/${config.mgMaxSteps}`, 'blocked');
-          } else {
-            stats.l++;
-            sessionStats.l++;
-            mgLevel = 0;
-            activeMartingaleTrade = null;
-            logMonitor(`⛔ Max Martingala - Stop ${direction}${priceChange}%`, 'blocked');
-          }
-        } else {
-          stats.l++;
-          sessionStats.l++;
-          logMonitor(`❌ PERDIDA ${direction}${priceChange}% (${referencePrice.toFixed(2)} → ${candle.c.toFixed(2)})`, 'blocked');
-        }
-        // Advertir sobre pérdidas consecutivas
-        if (consecutiveLosses >= 3) {
-          logMonitor(`⚠️ ${consecutiveLosses} pérdidas consecutivas`, 'pattern');
-        }
-      } else {
-        logMonitor(`↔️ EMPATE @ ${referencePrice.toFixed(2)}`, 'info');
-      }
-
-      toRemove.push(i);
-      updateStats();
-      checkStopConditions();
-    }
-  });
-
-  toRemove.reverse().forEach(i => pendingTrades.splice(i, 1));
-}
-
-function checkStopConditions() {
-  const sc = config.stopConfig;
-  
-  if (sc.useTime && sc.timeMin > 0) {
-    const elapsedMin = (Date.now() - startTime) / 60000;
-    if (elapsedMin >= sc.timeMin) {
-      logMonitor('⏱ Límite de tiempo alcanzado', 'blocked');
-      stopBot();
-      return;
-    }
-  }
-  
-  if (sc.useRisk && initialBalance > 0) {
-    const profit = balance - initialBalance;
-    const profitPct = (profit / initialBalance) * 100;
-    
-    if (sc.profitPct > 0 && profitPct >= sc.profitPct) {
-      logMonitor(`💰 Take Profit: +${profitPct.toFixed(1)}%`, 'success');
-      stopBot();
-      return;
-    }
-    if (sc.stopLossPct > 0 && profitPct <= -sc.stopLossPct) {
-      logMonitor(`⛔ Stop Loss: ${profitPct.toFixed(1)}%`, 'blocked');
-      stopBot();
-      return;
-    }
-  }
-  
-  if (sc.useTrades) {
-    if (sc.maxWins > 0 && sessionStats.w >= sc.maxWins) {
-      logMonitor(`🎯 Max wins alcanzado: ${sessionStats.w}`, 'success');
-      stopBot();
-      return;
-    }
-    if (sc.maxLosses > 0 && sessionStats.l >= sc.maxLosses) {
-      logMonitor(`⛔ Max losses alcanzado: ${sessionStats.l}`, 'blocked');
-      stopBot();
-      return;
-    }
-  }
-}
-
-// ============= FUNCIONES AUXILIARES =============
-function updateStats() {
-  if (DOM.uiW) DOM.uiW.textContent = stats.w;
-  if (DOM.uiL) DOM.uiL.textContent = stats.l;
-  const total = stats.w + stats.l;
-  const wr = total > 0 ? ((stats.w / total) * 100).toFixed(0) : '--';
-  if (DOM.uiWr) DOM.uiWr.textContent = `${wr}%`;
-  if (DOM.uiMg) DOM.uiMg.textContent = mgLevel;
-}
-
-/**
- * V12: Actualiza la UI del indicador de warmup
- */
-function updateWarmupUI() {
-  // Mostrar/ocultar barra de warmup dinámicamente en el signal-box
-  if (DOM.warmupContainer) {
-    if (isSystemWarmedUp) {
-      // Ocultar barra cuando el sistema está listo
-      DOM.warmupContainer.style.display = 'none';
-    } else if (isRunning) {
-      // Mostrar barra solo cuando el bot está activo y cargando
-      DOM.warmupContainer.style.display = 'block';
-    } else {
-      // Ocultar si el bot no está corriendo
-      DOM.warmupContainer.style.display = 'none';
-    }
-  }
-
-  // Actualizar porcentaje
-  if (DOM.warmupPct) {
-    DOM.warmupPct.textContent = `${systemWarmupLevel}%`;
-  }
-
-  // Actualizar barra de progreso
-  if (DOM.warmupBarFill) {
-    DOM.warmupBarFill.style.width = `${systemWarmupLevel}%`;
-  }
-
-  // Actualizar texto de estado
-  if (DOM.warmupText) {
-    if (isSystemWarmedUp) {
-      DOM.warmupText.textContent = 'Listo';
-    } else {
-      const analysisCandles = getAnalysisCandles();
-      DOM.warmupText.textContent = `Velas ${analysisCandles.length}/${TARGET_CANDLES_FULL}`;
-    }
-  }
-
-  // Actualizar indicadores técnicos en el info-grid
-  if (DOM.indEma) {
-    if (emaFast !== null && emaSlow !== null) {
-      const diff = ((emaFast - emaSlow) / emaSlow * 100).toFixed(2);
-      DOM.indEma.textContent = `${diff > 0 ? '+' : ''}${diff}%`;
-      DOM.indEma.style.color = diff > 0 ? '#00ff88' : diff < 0 ? '#ff5555' : '#888';
-    } else {
-      DOM.indEma.textContent = '--';
-      DOM.indEma.style.color = '#888';
-    }
-  }
-
-  if (DOM.indAtr) {
-    if (atrValue !== null) {
-      DOM.indAtr.textContent = atrValue.toFixed(4);
-      DOM.indAtr.style.color = volatilityLevel === 'high' ? '#ff5555' : volatilityLevel === 'low' ? '#888' : '#ff00ff';
-    } else {
-      DOM.indAtr.textContent = '--';
-      DOM.indAtr.style.color = '#888';
-    }
-  }
-
-  if (DOM.indTrend) {
-    DOM.indTrend.textContent = currentTrend.toUpperCase();
-    DOM.indTrend.style.color = currentTrend === 'bullish' ? '#00ff88' : currentTrend === 'bearish' ? '#ff5555' : '#ffff00';
-  }
-}
-
-function readAccount() {
-  try {
-    let foundBalance = false;
-    let foundAccountType = false;
-    let newBalance = 0;
-    let newIsDemo = isDemo;
-
-    // ============= MÉTODO PRIORITARIO: BUSCAR "Cuenta demo/real $X,XXX.XX" EN HEADER =============
-    try {
-      // Buscar el texto "Cuenta demo" o "Cuenta real" seguido del saldo
-      const headerElements = document.querySelectorAll('header *, [class*="header"] *, [class*="nav"] *');
-      for (const el of headerElements) {
-        if (el.children.length === 0 || el.tagName === 'SPAN' || el.tagName === 'DIV') {
-          const text = el.textContent || '';
-
-          // Buscar patrón "Cuenta demo" o "Cuenta real"
-          const accountMatch = text.match(/cuenta\s*(demo|real)/i);
-          if (accountMatch) {
-            newIsDemo = accountMatch[1].toLowerCase() === 'demo';
-            foundAccountType = true;
-
-            // Buscar el saldo cercano (puede estar en el mismo elemento o en un hermano)
-            const balanceMatch = text.match(/\$\s*([\d,]+\.?\d*)/);
-            if (balanceMatch) {
-              let balanceStr = balanceMatch[1].replace(/,/g, '');
-              const parsedBalance = parseFloat(balanceStr);
-              if (!isNaN(parsedBalance) && parsedBalance > 0) {
-                newBalance = parsedBalance;
-                foundBalance = true;
-                break;
-              }
-            }
-
-            // Si no encontró saldo en el mismo elemento, buscar en elementos cercanos
-            if (!foundBalance) {
-              const parent = el.parentElement;
-              if (parent) {
-                const siblingText = parent.textContent || '';
-                const sibBalanceMatch = siblingText.match(/\$\s*([\d,]+\.?\d*)/);
-                if (sibBalanceMatch) {
-                  let balanceStr = sibBalanceMatch[1].replace(/,/g, '');
-                  const parsedBalance = parseFloat(balanceStr);
-                  if (!isNaN(parsedBalance) && parsedBalance > 0) {
-                    newBalance = parsedBalance;
-                    foundBalance = true;
-                    break;
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    } catch (e) {
-      console.log('Error buscando en header:', e);
-    }
-
-    // ============= MÉTODO 2: ZUSTAND STORE (localStorage) =============
-    if (!foundBalance || !foundAccountType) {
-      try {
-        const walletStore = localStorage.getItem('wallet-store');
-        if (walletStore) {
-          const parsed = JSON.parse(walletStore);
-          if (parsed && parsed.state) {
-            if (typeof parsed.state.isDemo !== 'undefined' && !foundAccountType) {
-              newIsDemo = parsed.state.isDemo;
-              foundAccountType = true;
-            }
-
-            if (parsed.state.wallets && Array.isArray(parsed.state.wallets) && !foundBalance) {
-              const accountType = newIsDemo ? 'DEMO' : 'REAL';
-              const wallet = parsed.state.wallets.find(w => w.type === accountType);
-              if (wallet && typeof wallet.balance !== 'undefined') {
-                let rawBalance = wallet.balance;
-                if (typeof rawBalance === 'string') {
-                  rawBalance = rawBalance.replace(/[^0-9.-]/g, '');
-                }
-                let parsedBal = parseFloat(rawBalance) || 0;
-                if (parsedBal > 10000 && parsedBal.toString().length >= 6) {
-                  parsedBal = parsedBal / 100;
-                }
-                if (parsedBal > 0) {
-                  newBalance = parsedBal;
-                  foundBalance = true;
-                }
-              }
-            }
-          }
-        }
-      } catch (e) {}
-    }
-
-    // ============= MÉTODO 3: BUSCAR CUALQUIER SALDO VISIBLE EN HEADER =============
-    if (!foundBalance) {
-      try {
-        // Buscar elementos que contengan "$" y números en el header
-        const headerArea = document.querySelector('header') || document.querySelector('[class*="header"]');
-        if (headerArea) {
-          const textContent = headerArea.textContent || '';
-          const allBalances = textContent.match(/\$\s*([\d,]+\.?\d*)/g);
-          if (allBalances && allBalances.length > 0) {
-            // Tomar el primer saldo que parezca razonable (mayor a $1)
-            for (const match of allBalances) {
-              const numStr = match.replace(/[$,\s]/g, '');
-              const num = parseFloat(numStr);
-              if (!isNaN(num) && num > 1 && num < 10000000) {
-                newBalance = num;
-                foundBalance = true;
-                break;
-              }
-            }
-          }
-        }
-      } catch (e) {}
-    }
-
-    // ============= MÉTODO 4: SELECTORES ESPECÍFICOS DE WORBIT =============
-    if (!foundBalance) {
-      try {
-        const specificSelectors = [
-          '[class*="account-value"]',
-          '[class*="balance-value"]',
-          '[class*="wallet-balance"]',
-          '[class*="_balance_"]',
-          '[class*="money-value"]'
-        ];
-
-        for (const selector of specificSelectors) {
-          const elements = document.querySelectorAll(selector);
-          for (const el of elements) {
-            const text = el.textContent || '';
-            const match = text.match(/([\d,]+\.?\d*)/);
-            if (match) {
-              const num = parseFloat(match[1].replace(/,/g, ''));
-              if (!isNaN(num) && num > 0) {
-                newBalance = num;
-                foundBalance = true;
-                break;
-              }
-            }
-          }
-          if (foundBalance) break;
-        }
-      } catch (e) {}
-    }
-
-    // Si no se detectó tipo de cuenta, asumir DEMO por seguridad
-    if (!foundAccountType) {
-      newIsDemo = true;
-    }
-
-    // ============= ACTUALIZAR ESTADO Y UI =============
-    // Solo actualizar y loguear si hay cambios o es la primera vez
-    const balanceChanged = Math.abs(newBalance - lastLoggedBalance) > 0.01;
-    const shouldLog = foundBalance && (!balanceLoaded || balanceChanged);
-
-    if (foundBalance) {
-      balance = newBalance;
-      isDemo = newIsDemo;
-
-      if (shouldLog) {
-        logMonitor(`✓ Cuenta ${isDemo ? 'DEMO' : 'REAL'}: $${balance.toFixed(2)}`, 'success');
-        lastLoggedBalance = balance;
-        balanceLoaded = true;
-      }
-    }
-
-    // Actualizar UI siempre
-    if (DOM.accType) {
-      DOM.accType.textContent = isDemo ? 'DEMO' : 'REAL';
-      DOM.accType.style.background = isDemo ? 'rgba(241,196,15,.2)' : 'rgba(0,230,118,.2)';
-      DOM.accType.style.color = isDemo ? '#f1c40f' : '#00e676';
-    }
-    if (DOM.accBal) {
-      DOM.accBal.textContent = `$${balance.toFixed(2)}`;
-      DOM.accBal.style.color = balance > 0 ? '#fff' : '#ff0080';
-    }
-
-    // Log de errores solo la primera vez
-    if (!balanceLoaded && !foundBalance) {
-      logMonitor('⚠ No se pudo detectar saldo', 'blocked');
-    }
-
-  } catch (e) {
-    if (!balanceLoaded) {
-      logMonitor('❌ Error en readAccount: ' + e.message, 'blocked');
-    }
-  }
-}
-
-function logMonitor(msg, type = 'info') {
-  if (!DOM.monitorBox) return;
-  
-  const now = new Date();
-  const time = now.toTimeString().slice(0,8);
-  const cls = type === 'success' ? 'monitor-success' : 
-              type === 'blocked' ? 'monitor-blocked' : 
-              type === 'pattern' ? 'monitor-pattern' : 'monitor-info';
-  
-  const line = document.createElement('div');
-  line.className = 'monitor-line';
-  line.innerHTML = `<span class="monitor-time">${time}</span> <span class="${cls}">${msg}</span>`;
-  
-  DOM.monitorBox.appendChild(line);
-  
-  while (DOM.monitorBox.children.length > MAX_LOGS) {
-    DOM.monitorBox.removeChild(DOM.monitorBox.firstChild);
-  }
-  
-  DOM.monitorBox.scrollTop = DOM.monitorBox.scrollHeight;
-}
-
-function startHealthCheck() {
-  if (healthCheckInterval) clearInterval(healthCheckInterval);
-  
-  healthCheckInterval = setInterval(() => {
-    const now = Date.now();
-    const timeSinceLastTick = now - lastTickTime;
-    
-    if (timeSinceLastTick > DATA_TIMEOUT && wsConnected) {
-      wsConnected = false;
-      updateConnectionUI(false);
-      logMonitor('Sin datos - verificando...', 'blocked');
-      scheduleReconnect();
-    }
-    
-    // Actualizar timer
-    if (DOM.timerText && DOM.timerFill) {
-      const adjustedNow = now + config.timeOffset;
-      const sec = Math.ceil((60000 - (adjustedNow % 60000)) / 1000);
-      DOM.timerText.textContent = `⏱ Cierre: ${sec}s`;
-      const pct = ((60 - sec) / 60) * 100;
-      DOM.timerFill.style.width = `${pct}%`;
-      DOM.timerFill.style.background = sec <= 10 ? '#e74c3c' : sec <= 30 ? '#f1c40f' : '#00e676';
-    }
-    
-    // Actualizar runtime
-    if (DOM.uiRuntime && startTime > 0) {
-      const elapsed = Math.floor((now - startTime) / 1000);
-      const h = Math.floor(elapsed / 3600);
-      const m = Math.floor((elapsed % 3600) / 60);
-      DOM.uiRuntime.textContent = `${h.toString().padStart(2,'0')}h ${m.toString().padStart(2,'0')}m`;
-    }
-    
-  }, HEALTH_CHECK_INTERVAL);
-}
-
-// ============= CONTROL DEL BOT =============
-function startBot() {
-  if (isRunning) return;
-  
-  isRunning = true;
-  startTime = Date.now();
-  initialBalance = balance;
-  sessionStats = { w: 0, l: 0 };
-  mgLevel = 0;
-  tradeExecutedThisCandle = false;
-  lastTradeType = null;
-  activeMartingaleTrade = null;
-  pendingSignal = null;
-  chartAccessMethod = 'none';
-  
-  setupWebSocketInterceptor();
-  startHealthCheck();
-  startUIUpdateLoop(); // Iniciar actualización periódica de UI
-
-  // DIAGNÓSTICO: Ejecutar verificación de detección de datos
-  setTimeout(() => runDiagnostics(), 500); // Pequeño delay para que todo se inicialice
-  
-  // NUEVO: Iniciar sincronización con gráfico
-  if (config.useChartData) {
-    chartSyncInterval = setInterval(syncWithChart, CHART_SYNC_INTERVAL);
-  }
-  
-  if (DOM.mainBtn) {
-    DOM.mainBtn.textContent = 'DETENER';
-    DOM.mainBtn.classList.remove('btn-start');
-    DOM.mainBtn.classList.add('btn-stop');
-  }
-  
-  logMonitor('🟢 Sistema iniciado', 'success');
-  logMonitor(`Fuente de datos: ${config.useChartData ? 'AUTO (Gráfico+WS)' : 'WebSocket'}`, 'info');
-  
-  // Cargar histórico si tenemos un par activo
-  if (currentPair) {
-    loadHistoricalData(currentPair).then(hist => {
-      if (hist.length > 0) {
-        candles = hist;
-        chartCandles = hist.slice();
-        processed = hist.length;
-        // Contador de velas removido - usar warmup indicator
-// if (DOM.uiCnt) DOM.uiCnt.textContent = `${Math.min(processed, TARGET_CANDLES)}/${TARGET_CANDLES}`;
-      }
-    });
-  }
-}
-
-// ============= FUNCIÓN DE DIAGNÓSTICO =============
-function runDiagnostics() {
-  logMonitor('🔍 === INICIANDO DIAGNÓSTICO ===', 'info');
-  
-  // 1. VERIFICAR DETECCIÓN DE CUENTA
-  logMonitor('📋 Verificando detección de cuenta...', 'info');
-  readAccount(); // Esto ya mostrará logs de lo que detecta
-  
-  // 2. VERIFICAR ACCESO A STORES
-  logMonitor('💾 Verificando stores de localStorage...', 'info');
-  try {
-    const walletStore = localStorage.getItem('wallet-store');
-    if (walletStore) {
-      logMonitor('✓ wallet-store encontrado', 'success');
-      const parsed = JSON.parse(walletStore);
-      if (parsed && parsed.state && parsed.state.wallets) {
-        logMonitor(`✓ ${parsed.state.wallets.length} wallets en store`, 'success');
-        
-        // DEBUG: Mostrar valores crudos de cada wallet
-        parsed.state.wallets.forEach(w => {
-          logMonitor(`  → ${w.type}: ${w.balance} (crudo)`, 'info');
-        });
-        
-        // DEBUG: Mostrar isDemo
-        if (typeof parsed.state.isDemo !== 'undefined') {
-          logMonitor(`  → isDemo: ${parsed.state.isDemo}`, 'info');
-        }
-      }
-    } else {
-      logMonitor('⚠ wallet-store no encontrado', 'blocked');
-    }
-    
-    const chartStore = localStorage.getItem('chart-storage');
-    if (chartStore) {
-      logMonitor('✓ chart-storage encontrado', 'success');
-    } else {
-      logMonitor('⚠ chart-storage no encontrado', 'info');
-    }
-    
-    const symbolStore = localStorage.getItem('symbol-store');
-    if (symbolStore) {
-      logMonitor('✓ symbol-store encontrado', 'success');
-      const parsed = JSON.parse(symbolStore);
-      if (parsed && parsed.state && parsed.state.symbolSelected) {
-        logMonitor(`✓ Par actual: ${parsed.state.symbolSelected.ticker}`, 'success');
-      }
-    } else {
-      logMonitor('⚠ symbol-store no encontrado', 'info');
-    }
-  } catch (e) {
-    logMonitor('❌ Error verificando stores: ' + e.message, 'blocked');
-  }
-  
-  // 3. VERIFICAR ACCESO A TRADINGVIEW
-  logMonitor('📊 Verificando acceso a TradingView...', 'info');
-  try {
-    const widget = getTradingViewWidget();
-    if (widget) {
-      logMonitor('✓ Widget de TradingView accesible', 'success');
-      try {
-        const chart = widget.activeChart();
-        if (chart) {
-          logMonitor('✓ Gráfico activo detectado', 'success');
-        } else {
-          logMonitor('⚠ No hay gráfico activo', 'blocked');
-        }
-      } catch (e) {
-        logMonitor('⚠ Error accediendo al gráfico: ' + e.message, 'blocked');
-      }
-    } else {
-      logMonitor('⚠ Widget de TradingView no accesible', 'blocked');
-      logMonitor('ℹ El bot usará WebSocket como fuente', 'info');
-    }
-  } catch (e) {
-    logMonitor('❌ Error verificando TradingView: ' + e.message, 'blocked');
-  }
-  
-  // 4. VERIFICAR IFRAME DEL GRÁFICO
-  logMonitor('🖼️ Verificando iframe del gráfico...', 'info');
-  try {
-    const iframe = document.querySelector('iframe[title="Chart"]');
-    if (iframe) {
-      logMonitor('✓ Iframe del gráfico encontrado', 'success');
-      if (iframe.src) {
-        const url = new URL(iframe.src);
-        if (url.searchParams.get('ticker')) {
-          logMonitor(`✓ Ticker: ${url.searchParams.get('ticker')}`, 'success');
-        }
-        if (url.searchParams.get('symbolApiUrl')) {
-          logMonitor('✓ API URL presente en iframe', 'success');
-        }
-      }
-    } else {
-      logMonitor('⚠ Iframe del gráfico no encontrado', 'blocked');
-    }
-  } catch (e) {
-    logMonitor('❌ Error verificando iframe: ' + e.message, 'blocked');
-  }
-  
-  // 5. VERIFICAR WEBSOCKET
-  logMonitor('🌐 Estado de WebSocket...', 'info');
-  if (wsConnected) {
-    logMonitor('✓ WebSocket conectado', 'success');
-    if (candles.length > 0) {
-      logMonitor(`✓ Velas acumuladas: ${candles.length}`, 'success');
-      logMonitor(`✓ Última vela: ${new Date(candles[candles.length - 1].s).toLocaleTimeString()}`, 'info');
-    } else {
-      logMonitor('ℹ Sin velas aún - esperando datos', 'info');
-    }
-  } else {
-    logMonitor('⚠ WebSocket no conectado (aún)', 'info');
-    logMonitor('ℹ El WebSocket se conectará automáticamente', 'info');
-    logMonitor('ℹ Puede tardar 5-15 segundos en recibir datos', 'info');
-  }
-  
-  // 6. ESTADO DE VELAS Y DATOS DEL GRÁFICO
-  logMonitor('📊 Verificando datos del gráfico...', 'info');
-  if (processed >= TARGET_CANDLES) {
-    logMonitor(`✓ Velas suficientes: ${processed}/${TARGET_CANDLES}`, 'success');
-  } else {
-    logMonitor(`⏳ Acumulando velas: ${processed}/${TARGET_CANDLES}`, 'info');
-    logMonitor('ℹ Espera 1-3 minutos para acumular 3 velas', 'info');
-  }
-  
-  if (currentPair) {
-    logMonitor(`✓ Par actual: ${currentPair}`, 'success');
-  } else {
-    logMonitor('⚠ Sin par seleccionado', 'blocked');
-  }
-  
-  // 7. RESUMEN FINAL
-  logMonitor('📊 === RESUMEN DE DIAGNÓSTICO ===', 'info');
-  logMonitor(`Saldo: $${balance.toFixed(2)} | Cuenta: ${isDemo ? 'DEMO' : 'REAL'}`, balance > 0 ? 'success' : 'blocked');
-  logMonitor(`Velas: ${processed}/${TARGET_CANDLES} | Par: ${currentPair || 'N/A'}`, 'info');
-  logMonitor(`WebSocket: ${wsConnected ? 'Conectado' : 'Esperando'}`, wsConnected ? 'success' : 'info');
-  logMonitor(`Método de datos: ${config.useChartData ? 'AUTO' : 'WebSocket'}`, 'info');
-  
-  if (!wsConnected || processed < TARGET_CANDLES) {
-    logMonitor('', 'info');
-    logMonitor('⏰ IMPORTANTE: Espera 1-3 minutos', 'info');
-    logMonitor('   El bot necesita acumular 3 velas', 'info');
-    logMonitor('   completas antes de detectar patrones', 'info');
-  }
-  
-  logMonitor('=================================', 'info');
-}
-
-
-function stopBot() {
-  isRunning = false;
-
-  if (healthCheckInterval) {
-    clearInterval(healthCheckInterval);
-    healthCheckInterval = null;
-  }
-
-  if (chartSyncInterval) {
-    clearInterval(chartSyncInterval);
-    chartSyncInterval = null;
-  }
-
-  if (wsReconnectTimeout) {
-    clearTimeout(wsReconnectTimeout);
-    wsReconnectTimeout = null;
-  }
-
-  stopUIUpdateLoop(); // Detener actualización de UI y mostrar estado detenido
-
-  if (DOM.mainBtn) {
-    DOM.mainBtn.textContent = 'INICIAR SISTEMA';
-    DOM.mainBtn.classList.remove('btn-stop');
-    DOM.mainBtn.classList.add('btn-start');
-  }
-
-  logMonitor('🔴 Sistema detenido', 'blocked');
-  
-  // Resumen de sesión
-  const sessionTotal = sessionStats.w + sessionStats.l;
-  if (sessionTotal > 0) {
-    const wr = ((sessionStats.w / sessionTotal) * 100).toFixed(0);
-    logMonitor(`📊 Sesión: ${sessionStats.w}W/${sessionStats.l}L (${wr}%)`, 'info');
-  }
-}
-
-// ============= INICIALIZACIÓN =============
-function initSystem() {
-  if (isSystemReady) return;
-  
-  try {
-    setupWebSocketInterceptor();
-    
-    let hud = document.getElementById('worbit-hud');
-    if (!hud) {
-      hud = document.createElement('div');
-      hud.id = 'worbit-hud';
-      hud.innerHTML = `
+const WS_RECONNECT_DELAYS = [2000, 5000, 10000, 15000, 30000];
+const WS_MAX_RECONNECT_ATTEMPTS = 9999;
+const MIN_TREND_CANDLES = 5;
+
+// ============= HUD HTML & CSS =============
+const HUD_HTML = `
 <style>
-#worbit-hud{position:fixed;top:10px;right:20px;width:320px;max-height:calc(100vh - 20px);background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);border-radius:14px;box-shadow:0 0 20px rgba(0,255,255,.4),0 0 40px rgba(0,255,255,.2),0 10px 40px rgba(0,0,0,.6);z-index:999999;font-family:'Segoe UI',system-ui,sans-serif;display:none;border:1px solid rgba(0,255,255,.3);animation:hud-glow 3s ease-in-out infinite;overflow:hidden;display:flex;flex-direction:column}
-#worbit-hud.visible{display:flex}
+#worbit-hud{position:fixed;top:10px;right:20px;width:320px;max-height:calc(100vh - 20px);background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);border-radius:14px;box-shadow:0 0 20px rgba(0,255,255,.4),0 0 40px rgba(0,255,255,.2),0 10px 40px rgba(0,0,0,.6);z-index:999999;font-family:'Segoe UI',system-ui,sans-serif;display:none !important;border:1px solid rgba(0,255,255,.3);animation:hud-glow 3s ease-in-out infinite;overflow:hidden;flex-direction:column}
+#worbit-hud.visible{display:flex !important}
 #worbit-hud::-webkit-scrollbar{width:3px}
 #worbit-hud::-webkit-scrollbar-track{background:transparent}
 #worbit-hud::-webkit-scrollbar-thumb{background:rgba(0,255,255,.2);border-radius:2px}
@@ -2370,8 +75,9 @@ function initSystem() {
 .session-timer{color:#00ffff;text-shadow:0 0 5px #00ffff}
 #timer-bar-bg{height:3px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden}
 #timer-bar-fill{height:100%;width:0;background:#00ffff;transition:width .3s,background .3s;box-shadow:0 0 8px #00ffff}
-.info-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:12px}
-.stat-box{background:rgba(255,255,255,.05);padding:8px 4px;border-radius:8px;text-align:center}
+.info-grid{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.stat-box{background:rgba(255,255,255,.05);padding:8px 4px;border-radius:8px;text-align:center;flex:1 1 45%}
+.info-grid .stat-box:last-child:nth-child(odd){flex-basis:100%}
 .stat-box .stat-label{font-size:9px;color:#666;text-transform:uppercase;margin-bottom:2px}
 .stat-box .stat-val{font-size:11px;font-weight:600;color:#fff}
 #signal-box{padding:16px;border-radius:12px;text-align:center;margin-bottom:12px;background:linear-gradient(135deg,rgba(0,0,0,.4) 0%,rgba(0,0,0,.2) 100%);transition:all .3s;border:2px solid transparent;min-height:80px}
@@ -2465,10 +171,6 @@ function initSystem() {
       <span class="switch-label">Operar Siguiente Vela</span>
       <div class="switch-toggle"></div>
     </div>
-    <div class="switch-box" id="sw-chart">
-      <span class="switch-label">Usar Datos del Gráfico</span>
-      <div class="switch-toggle"></div>
-    </div>
 
     <div class="config-section-title">PARÁMETROS</div>
     <div class="config-row">
@@ -2543,12 +245,10 @@ function initSystem() {
 
   <div class="info-grid">
     <div class="stat-box"><div class="stat-label">ACTIVO</div><div class="stat-val" id="ui-active" style="color:#00ffff;font-size:9px;text-shadow:0 0 5px #00ffff">--</div></div>
-    <div class="stat-box"><div class="stat-label">EMA</div><div class="stat-val" id="ind-ema" style="color:#00ff88">--</div></div>
-    <div class="stat-box"><div class="stat-label">ATR</div><div class="stat-val" id="ind-atr" style="color:#ff00ff">--</div></div>
-    <div class="stat-box"><div class="stat-label">TREND</div><div class="stat-val" id="ind-trend" style="color:#ffff00">--</div></div>
+    <div class="stat-box"><div class="stat-label">ESTRUCTURA</div><div class="stat-val" id="ind-trend" style="color:#ffff00">--</div></div>
   </div>
   <div class="info-grid" id="mg-row" style="display:none;grid-template-columns:1fr">
-    <div class="stat-box" id="mg-box"><div class="stat-label">NIVEL MG</div><div class="stat-val" id="ui-mg" style="color:#ff00ff;text-shadow:0 0 5px #ff00ff">0</div></div>
+    <div class="stat-box" id="mg-box"><div class="stat-label">NIVEL MG</div><div class="stat-val" id="ui-mg" style="color:#ff00ff;text-shadow:0 0 0 5px #ff00ff">0</div></div>
   </div>
 
   <div id="signal-box">
@@ -2575,7 +275,161 @@ function initSystem() {
   </div>
 
   <button class="btn-main btn-start" id="main-btn">INICIAR SISTEMA</button>
-</div>`;
+</div>
+`;
+
+// ============= ESTADO GLOBAL =============
+let DOM = {};
+let isSystemReady = false;
+let isVisible = false;
+let isRunning = false;
+let isStopPending = false;      // Nuevo: Bandera para parada segura
+let stopPendingReason = '';     // Nuevo: Razón de la parada pendiente
+
+// Configuración (se carga desde storage)
+let config = {
+  autoTrade: false,
+  useMartingale: false,
+  invertTrade: false,
+  useConfirmation: false,
+  operateOnNext: false,
+  riskPct: 1,
+  mgMaxSteps: 3,
+  mgFactor: 2.0,
+  entrySec: 57,           // Segundo de entrada (57 = 3 segundos antes del cierre)
+  entryWindowSec: 3,      // Duración de la ventana de entrada en segundos
+  timeOffset: 0,
+  stopConfig: {
+    useTime: false,
+    timeMin: 0,
+    useRisk: false,
+    profitPct: 0,
+    stopLossPct: 0,
+    useTrades: false,
+    maxWins: 0,
+    maxLosses: 0
+  }
+};
+
+// Estado de trading
+let balance = 0;
+let lastLoggedBalance = 0; // Para evitar loguear el mismo saldo repetidamente
+let balanceLoaded = false; // Flag para indicar que el saldo ya fue cargado
+let isDemo = true;
+let currentAmt = 0;
+let mgLevel = 0;
+let candles = [];
+let currentCandle = null;
+let currentPair = '';
+let pendingTrades = [];
+let processed = 0;
+let tradeExecutedThisCandle = false;
+let lastTradeType = null;
+let activeMartingaleTrade = null;
+let pendingSignal = null;
+let stats = { w: 0, l: 0 };
+let sessionStats = { w: 0, l: 0 };
+let startTime = 0;
+let initialBalance = 0;
+let lastTickTime = 0;
+let wsConnected = false;
+let lastWsData = null;
+let lastTradeTime = 0;             // Timestamp del último trade ejecutado
+let consecutiveLosses = 0;         // Contador de pérdidas consecutivas
+
+// ============= NUEVO V12: SISTEMA DE WARMUP =============
+let systemWarmupLevel = 0;         // 0-100% de preparación
+let isSystemWarmedUp = false;      // True cuando está al 100%
+
+// ============= NUEVO V12: PRICE ACTION & TREND =============
+let currentTrend = 'neutral';      // 'bullish', 'bearish', 'neutral'
+let localHigh = -Infinity;         // Máximo local para microtendencia
+let localLow = Infinity;           // Mínimo local para microtendencia
+
+// ============= NUEVO V12: WEBSOCKET ROBUSTO =============
+let wsReconnectAttempt = 0;
+let activeWebSocket = null;
+let wsHeartbeatInterval = null;
+let lastWsMessageTime = 0;
+
+// ============= NUEVO V12: MONITOR DE TRADE EN TIEMPO REAL =============
+let activeTradeMonitor = null;     // Trade activo siendo monitoreado
+let tradeProgressData = [];        // Historial de precios durante el trade
+
+// Intervalos
+let tickerInterval = null;
+let sessionInterval = null;
+let healthCheckInterval = null;
+let warmupInterval = null;
+
+// ============= FUNCIONES DE ESTADO (Movidias arriba para evitar ReferenceError) =============
+function checkWarmupStatus() {
+  const currentCandles = candles.length;
+  // Usamos TARGET_CANDLES_FULL (3) como objetivo para estar listos
+  // ya que necesitamos prev2 (3 velas: actual, prev, prev2) para patrones
+  const target = TARGET_CANDLES_FULL; 
+  
+  if (target <= 0) {
+      systemWarmupLevel = 100;
+      isSystemWarmedUp = true;
+      return true;
+  }
+  
+  systemWarmupLevel = Math.min(100, Math.floor((currentCandles / target) * 100));
+  isSystemWarmedUp = currentCandles >= target;
+  
+  return isSystemWarmedUp;
+}
+
+function stopBot(force = false) {
+  if (!isRunning && !force) return;
+  
+  isRunning = false;
+  isStopPending = false;
+  stopPendingReason = '';
+  
+  // Limpiar intervalos
+  if (healthCheckInterval) {
+      clearInterval(healthCheckInterval);
+      healthCheckInterval = null;
+  }
+  
+  stopUIUpdateLoop();
+  
+  // Resetear estados visuales
+  if (DOM.mainBtn) {
+    DOM.mainBtn.textContent = 'INICIAR SISTEMA';
+    DOM.mainBtn.classList.remove('btn-stop');
+    DOM.mainBtn.classList.add('btn-start');
+  }
+  
+  // Resetear caja de señales
+  if (DOM.signalBox) {
+      DOM.signalBox.className = 'sig-waiting';
+      DOM.signalStatus.innerHTML = `
+        <div class="signal-title" style="color:#00ffff;font-size:11px">SISTEMA DETENIDO</div>
+        <div class="signal-subtitle" style="color:#888;font-size:9px">Presiona INICIAR para continuar</div>`;
+  }
+  
+  if (DOM.warmupContainer) {
+      DOM.warmupContainer.style.display = 'none';
+  }
+
+  logMonitor('🔴 Sistema detenido', 'blocked');
+}
+
+// ============= INICIALIZACIÓN =============
+function initSystem() {
+  if (isSystemReady) return;
+  
+  try {
+    setupWebSocketInterceptor();
+    
+    let hud = document.getElementById('worbit-hud');
+    if (!hud) {
+      hud = document.createElement('div');
+      hud.id = 'worbit-hud';
+      hud.innerHTML = HUD_HTML;
       document.body.appendChild(hud);
     }
     
@@ -2593,7 +447,6 @@ function initSystem() {
       swInv: $('sw-inv'),
       swConfirm: $('sw-confirm'),
       swNext: $('sw-next'),
-      swChart: $('sw-chart'),
       swTime: $('sw-time'),
       swRisk: $('sw-risk'),
       swTrades: $('sw-trades'),
@@ -2642,8 +495,6 @@ function initSystem() {
       signalStatus: $('signal-status'),
       mgRow: $('mg-row'),
       // Indicadores en info-grid
-      indEma: $('ind-ema'),
-      indAtr: $('ind-atr'),
       indTrend: $('ind-trend')
     };
     
@@ -2683,14 +534,6 @@ function initSystem() {
       config.invertTrade = !config.invertTrade;
       this.classList.toggle('active', config.invertTrade);
       logMonitor(`Inversión: ${config.invertTrade ? 'ON' : 'OFF'}`);
-      saveConfigToStorage();
-    };
-    
-    // NUEVO: Switch para usar datos del gráfico
-    if (DOM.swChart) DOM.swChart.onclick = function() {
-      config.useChartData = !config.useChartData;
-      this.classList.toggle('active', config.useChartData);
-      logMonitor(`Datos del gráfico: ${config.useChartData ? 'ON' : 'OFF'}`);
       saveConfigToStorage();
     };
     
@@ -2776,7 +619,7 @@ function initSystem() {
       DOM.hud.classList.remove('visible');
       stopBot();
     };
-    if (DOM.mainBtn) DOM.mainBtn.onclick = () => isRunning ? stopBot() : startBot();
+    if (DOM.mainBtn) DOM.mainBtn.onclick = () => isRunning ? stopBot(true) : startBot();
     
     // Dragging
     let dragging = false, dragStartX = 0, dragStartY = 0, hudOffsetX = 0, hudOffsetY = 0;
@@ -2800,6 +643,13 @@ function initSystem() {
     
     // Final Init
     isSystemReady = true;
+    
+    // Asegurar que inicie oculto
+    if (!isVisible && DOM.hud) {
+        DOM.hud.classList.remove('visible');
+        DOM.hud.style.display = 'none';
+    }
+    
     updateStats();
     readAccount();
     loadConfigFromStorage();
@@ -2812,20 +662,1295 @@ function initSystem() {
   }
 }
 
+// ============= NUEVO: ACCESO AL GRÁFICO =============
+
+/**
+ * Obtiene las velas para análisis (Solo WebSocket)
+ */
+function getAnalysisCandles() {
+  return candles;
+}
+
+/**
+ * Valida que una vela esté completamente cerrada
+ */
+function isCandleClosed(candle, currentTime) {
+  if (!candle || !candle.s) return false;
+  const candleEndTime = candle.s + 60000; // Vela de 1 minuto
+  return currentTime >= candleEndTime;
+}
+
+// ============= WORBIT STORE ACCESS (Simplificado) =============
+function getSelectedSymbol() {
+  try {
+    const symbolStore = localStorage.getItem('symbol-store');
+    if (symbolStore) {
+      const parsed = JSON.parse(symbolStore);
+      if (parsed.state && parsed.state.symbolSelected) {
+        return parsed.state.symbolSelected;
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
+// ============= WEBSOCKET INTERCEPTOR MEJORADO V12 =============
+let originalWebSocket = null;
+let wsReconnectTimeout = null;
+let lastWsUrl = null;
+let lastWsProtocols = null;
+
+function setupWebSocketInterceptor() {
+  if (originalWebSocket) return;
+
+  originalWebSocket = window.WebSocket;
+
+  window.WebSocket = function(url, protocols) {
+    const ws = new originalWebSocket(url, protocols);
+
+    // V12: Guardar URL y protocolos para reconexión
+    // Interceptar tanto precios como API del broker
+    const isPriceSocket = url.includes('symbol-prices');
+    const isBrokerSocket = url.includes('broker-api');
+
+    if (isPriceSocket) {
+      lastWsUrl = url;
+      lastWsProtocols = protocols;
+      activeWebSocket = ws;
+    }
+
+    ws.addEventListener('open', () => {
+      if (isPriceSocket) {
+        wsConnected = true;
+        lastTickTime = Date.now();
+        lastWsMessageTime = Date.now();
+        wsReconnectAttempt = 0; // V12: Resetear contador de intentos
+        logMonitor('✓ WebSocket conectado', 'success');
+        updateConnectionUI(true);
+        startWsHeartbeat(); // V12: Iniciar monitoreo de heartbeat
+      } else if (isBrokerSocket) {
+        logMonitor('✓ Broker API conectado', 'info');
+      }
+    });
+
+    ws.addEventListener('close', (event) => {
+      if (isPriceSocket) {
+        wsConnected = false;
+        activeWebSocket = null;
+        logMonitor(`⚠ WebSocket cerrado (${event.code})`, 'blocked');
+        updateConnectionUI(false);
+        scheduleReconnect(); // V12: Reconexión instantánea
+      }
+    });
+
+    ws.addEventListener('error', () => {
+      if (isPriceSocket) {
+        logMonitor('⚠ Error WebSocket', 'blocked');
+        updateConnectionUI(false);
+      }
+    });
+
+    ws.addEventListener('message', (event) => {
+      lastWsMessageTime = Date.now(); // V12: Actualizar timestamp de último mensaje
+      processWebSocketMessage(event.data);
+    });
+
+    return ws;
+  };
+
+  window.WebSocket.prototype = originalWebSocket.prototype;
+  Object.keys(originalWebSocket).forEach(key => {
+    if (key !== 'prototype') {
+      try { window.WebSocket[key] = originalWebSocket[key]; } catch(e) {}
+    }
+  });
+
+  // V12: Iniciar monitoreo de health del WebSocket
+  setInterval(checkWsHealth, 3000);
+}
+
+/**
+ * V12: Monitorea la salud del WebSocket y detecta conexiones zombies
+ */
+function checkWsHealth() {
+  if (!isRunning) return;
+
+  const timeSinceLastMessage = Date.now() - lastWsMessageTime;
+  const TIMEOUT_THRESHOLD = 3000; // 3 segundos sin datos es sospechoso
+
+  if (timeSinceLastMessage > TIMEOUT_THRESHOLD) {
+    if (wsConnected) {
+        logMonitor('⚠ Conexión inestable detectada...', 'pattern');
+        wsConnected = false;
+        updateConnectionUI(false);
+    }
+    
+    // Intentar reconectar proactivamente
+    if (!wsReconnectTimeout) {
+        scheduleReconnect();
+    }
+  }
+}
+
+/**
+ * V12: Inicia el heartbeat del WebSocket para detectar desconexiones rápidamente
+ */
+function startWsHeartbeat() {
+  if (wsHeartbeatInterval) clearInterval(wsHeartbeatInterval);
+
+  wsHeartbeatInterval = setInterval(() => {
+    if (!wsConnected || !activeWebSocket) return;
+
+    // Verificar si el WebSocket sigue abierto
+    if (activeWebSocket.readyState !== WebSocket.OPEN) {
+      wsConnected = false;
+      updateConnectionUI(false);
+      scheduleReconnect();
+    }
+  }, 1000);
+}
+
+function processWebSocketMessage(data) {
+  if (typeof data !== 'string') return;
+
+  // Procesar actualizaciones de precios
+  if (data.includes('symbol.price.update')) {
+    try {
+      const startIdx = data.indexOf('[');
+      if (startIdx === -1) return;
+      
+      const json = JSON.parse(data.substring(startIdx));
+      if (!Array.isArray(json) || json.length < 2) return;
+      
+      const payload = json[1];
+      if (!payload || payload.event !== 'symbol.price.update') return;
+      
+      const priceData = payload.data;
+      if (!priceData || !priceData.closePrice) return;
+      
+      wsConnected = true;
+      lastTickTime = Date.now();
+      
+      lastWsData = {
+        closePrice: parseFloat(priceData.closePrice),
+        openPrice: parseFloat(priceData.openPrice || priceData.closePrice),
+        highPrice: parseFloat(priceData.highPrice || priceData.closePrice),
+        lowPrice: parseFloat(priceData.lowPrice || priceData.closePrice),
+        time: priceData.time || Date.now(),
+        pair: priceData.pair,
+        volume: parseFloat(priceData.volume || 0)
+      };
+      
+      if (isSystemReady && isRunning) {
+        onTick(lastWsData);
+      }
+      
+      window.postMessage({ type: 'SNIPER_WS_DATA', data: lastWsData }, '*');
+    } catch (e) {}
+  }
+  
+  // Procesar posibles actualizaciones de balance (experimental)
+  if (data.includes('wallet') || data.includes('balance') || data.includes('user.update')) {
+    try {
+        // Intentar extraer números que parezcan balances
+        const matches = data.match(/"balance":\s*([\d.]+)/);
+        if (matches && matches[1]) {
+            const bal = parseFloat(matches[1]);
+            if (!isNaN(bal)) {
+                balance = bal;
+                balanceLoaded = true;
+                logMonitor(`✓ Saldo actualizado (WS): $${balance.toFixed(2)}`, 'success');
+                if (DOM.accBal) DOM.accBal.textContent = `$${balance.toFixed(2)}`;
+            }
+        }
+    } catch(e) {}
+  }
+}
+
+/**
+ * V12: Sistema de reconexión instantánea con backoff exponencial
+ * No recarga la página, crea una nueva conexión WebSocket directamente
+ */
+function scheduleReconnect() {
+  if (wsReconnectTimeout) return;
+  if (!isRunning) return;
+
+  // Determinar delay basado en el intento actual
+  const delayIndex = Math.min(wsReconnectAttempt, WS_RECONNECT_DELAYS.length - 1);
+  const delay = WS_RECONNECT_DELAYS[delayIndex];
+
+  wsReconnectTimeout = setTimeout(() => {
+    wsReconnectTimeout = null;
+    if (wsConnected) {
+      wsReconnectAttempt = 0;
+      return;
+    }
+
+    wsReconnectAttempt++;
+
+    // ESTRATEGIA DE RECUPERACIÓN ESCALONADA (NUEVO V13)
+    // Si falla 3 veces seguidas, es probable que el token haya expirado.
+    // Forzamos recarga del gráfico para obtener nuevo token.
+    if (wsReconnectAttempt > 3) {
+        logMonitor(`🔄 Inestabilidad persistente: Reiniciando gráfico...`, 'pattern');
+        forceChartReconnect();
+        wsReconnectAttempt = 2; // Retroceder un poco para dar tiempo
+        return;
+    }
+
+    logMonitor(`🔄 Reconectando (${wsReconnectAttempt})...`, 'info');
+    attemptDirectReconnect();
+
+  }, delay);
+}
+
+/**
+ * V12: Intenta reconectar directamente creando un nuevo WebSocket
+ */
+function attemptDirectReconnect() {
+  // Si tenemos la URL guardada, intentar crear una nueva conexión
+  if (lastWsUrl) {
+    try {
+      // Al crear un new WebSocket, el interceptor lo capturará
+      // y configurará los listeners automáticamente.
+      // No necesitamos guardar la referencia aquí, el interceptor lo hará.
+      // Añadir timestamp para evitar caché
+      const urlObj = new URL(lastWsUrl);
+      urlObj.searchParams.set('_t', Date.now());
+      new window.WebSocket(urlObj.toString(), lastWsProtocols);
+      return;
+    } catch (e) {
+      // console.error('Error al reconectar:', e);
+    }
+  }
+
+  // Si falla, reintentar indefinidamente sin molestar al usuario con recargas
+  scheduleReconnect();
+}
+
+/**
+ * V12: Método de fallback - recarga el iframe del gráfico
+ */
+function forceChartReconnect() {
+  // Buscar iframe del gráfico (suele tener src con 'chart' o ser el principal)
+  const chartFrames = document.querySelectorAll('iframe');
+  let targetFrame = null;
+
+  for (const frame of chartFrames) {
+      if (frame.src && (frame.src.includes('chart') || frame.src.includes('tradingview'))) {
+          targetFrame = frame;
+          break;
+      }
+  }
+
+  if (targetFrame) {
+    try {
+      // Recargar iframe
+      targetFrame.src = targetFrame.src;
+      logMonitor('✓ Gráfico recargado', 'success');
+    } catch(e) {
+      logMonitor('⚠ Error recargando gráfico', 'info');
+    }
+  } else {
+      logMonitor('⚠ No se encontró frame de gráfico', 'info');
+  }
+}
+
+function updateConnectionUI(connected) {
+  if (DOM.dot) {
+    DOM.dot.style.background = connected ? '#00e676' : '#e74c3c';
+    DOM.dot.style.boxShadow = connected ? '0 0 8px #00e676' : '0 0 8px #e74c3c';
+  }
+}
+
+// ============= CARGA DE DATOS HISTÓRICOS =============
+// API Histórica eliminada. El bot operará exclusivamente con datos en tiempo real (Warmup).
+async function loadHistoricalData(pair) {
+  return [];
+}
+
+// ============= PERSISTENCIA DE CONFIGURACIÓN =============
+function saveConfigToStorage() {
+  const configToSave = {
+    autoTrade: config.autoTrade,
+    useMartingale: config.useMartingale,
+    invertTrade: config.invertTrade,
+    useConfirmation: config.useConfirmation,
+    operateOnNext: config.operateOnNext,
+    riskPct: config.riskPct,
+    mgMaxSteps: config.mgMaxSteps,
+    mgFactor: config.mgFactor,
+    entrySec: config.entrySec,
+    entryWindowSec: config.entryWindowSec,
+    timeOffset: config.timeOffset,
+    stopConfig: config.stopConfig
+  };
+  window.postMessage({ type: 'SNIPER_SAVE_CONFIG', data: configToSave }, '*');
+}
+
+function loadConfigFromStorage() {
+  window.postMessage({ type: 'SNIPER_LOAD_CONFIG' }, '*');
+}
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window) return;
+  
+  if (event.data.type === 'SNIPER_CONFIG_LOADED' && event.data.config) {
+    const c = event.data.config;
+    // Merge profundo cuidadoso para stopConfig
+    if (c.stopConfig) {
+        config.stopConfig = { ...config.stopConfig, ...c.stopConfig };
+        delete c.stopConfig; // Ya procesado
+    }
+    config = { ...config, ...c };
+    applyConfigToUI();
+    logMonitor('Configuración restaurada', 'info');
+  }
+});
+
+function applyConfigToUI() {
+  if (!DOM.swAuto) return;
+
+  // Switches principales
+  DOM.swAuto.classList.toggle('active', config.autoTrade);
+  DOM.swMg.classList.toggle('active', config.useMartingale);
+  DOM.swInv.classList.toggle('active', config.invertTrade);
+  if (DOM.swConfirm) DOM.swConfirm.classList.toggle('active', config.useConfirmation);
+  if (DOM.swNext) DOM.swNext.classList.toggle('active', config.operateOnNext);
+
+  // Inputs numéricos
+  if (DOM.riskPct) DOM.riskPct.value = config.riskPct;
+  if (DOM.mgSteps) DOM.mgSteps.value = config.mgMaxSteps;
+  if (DOM.mgFactor) DOM.mgFactor.value = config.mgFactor;
+  if (DOM.entrySec) DOM.entrySec.value = config.entrySec;
+  if (DOM.timerDelay) DOM.timerDelay.value = config.timeOffset;
+  // Corregido: Mostrar/ocultar la fila completa del contador de Martingala
+  if (DOM.mgRow) DOM.mgRow.style.display = config.useMartingale ? 'grid' : 'none';
+
+  // Stop Config
+  if (config.stopConfig) {
+    if (DOM.swTime) DOM.swTime.classList.toggle('active', config.stopConfig.useTime);
+    if (DOM.swRisk) DOM.swRisk.classList.toggle('active', config.stopConfig.useRisk);
+    if (DOM.swTrades) DOM.swTrades.classList.toggle('active', config.stopConfig.useTrades);
+    if (DOM.sessionTime) DOM.sessionTime.value = config.stopConfig.timeMin || 60;
+    if (DOM.profitTarget) DOM.profitTarget.value = config.stopConfig.profitPct || 10;
+    if (DOM.stopLoss) DOM.stopLoss.value = config.stopConfig.stopLossPct || 10;
+    if (DOM.maxWins) DOM.maxWins.value = config.stopConfig.maxWins || 5;
+    if (DOM.maxLosses) DOM.maxLosses.value = config.stopConfig.maxLosses || 3;
+
+    if (DOM.grpTime) DOM.grpTime.classList.toggle('disabled-group', !config.stopConfig.useTime);
+    if (DOM.grpRisk) DOM.grpRisk.classList.toggle('disabled-group', !config.stopConfig.useRisk);
+    if (DOM.grpTrades) DOM.grpTrades.classList.toggle('disabled-group', !config.stopConfig.useTrades);
+  }
+}
+
+// ============= FUNCIONES DE PRICE ACTION =============
+const getBody = c => Math.abs(c.c - c.o);
+const getUpperWick = c => c.h - Math.max(c.o, c.c);
+const getLowerWick = c => Math.min(c.o, c.c) - c.l;
+const isGreen = c => c.c > c.o;
+const isRed = c => c.c < c.o;
+const getAvgBody = (arr, count = 10) => {
+  if (arr.length < count) return 0;
+  return arr.slice(-count).reduce((a, c) => a + getBody(c), 0) / count;
+};
+
+function getLevels(arr, index) {
+  const supports = [], resistances = [];
+  const lookback = Math.min(index, 50);
+  const start = Math.max(0, index - lookback);
+  
+  for (let i = start + 2; i < index - 2; i++) {
+    const c = arr[i];
+    if (c.h > arr[i-1].h && c.h > arr[i-2].h && c.h > arr[i+1].h && c.h > arr[i+2].h) {
+      resistances.push(c.h);
+    }
+    if (c.l < arr[i-1].l && c.l < arr[i-2].l && c.l < arr[i+1].l && c.l < arr[i+2].l) {
+      supports.push(c.l);
+    }
+  }
+  return { supports, resistances };
+}
+
+function isNearLevel(price, levels, threshold = 0.0002) {
+  return levels.some(lvl => Math.abs(price - lvl) < (price * threshold));
+}
+
+function isPinBar(c, type) {
+  const body = getBody(c);
+  const upper = getUpperWick(c);
+  const lower = getLowerWick(c);
+  if (type === 'bullish') return lower > (body * 2) && upper < body;
+  if (type === 'bearish') return upper > (body * 2) && lower < body;
+  return false;
+}
+
+function isEngulfing(curr, prev, type) {
+  if (type === 'bullish') return isRed(prev) && isGreen(curr) && curr.c > prev.o && curr.o < prev.c;
+  if (type === 'bearish') return isGreen(prev) && isRed(curr) && curr.c < prev.o && curr.o > prev.c;
+  return false;
+}
+
+function isExhaustion(c, type) {
+  const body = getBody(c);
+  const upper = getUpperWick(c);
+  const lower = getLowerWick(c);
+  if (type === 'bullish') return lower > (body * 3);
+  if (type === 'bearish') return upper > (body * 3);
+  return false;
+}
+
+function isStrongMomentum(arr, type) {
+  if (arr.length < 5) return false;
+  const last = arr[arr.length - 1];
+  const prev = arr[arr.length - 2];
+  const prev2 = arr[arr.length - 3];
+  const avgBody = getAvgBody(arr);
+
+  if (type === 'bearish') {
+    return isRed(last) && isRed(prev) && isRed(prev2) && getBody(last) > avgBody;
+  }
+  if (type === 'bullish') {
+    return isGreen(last) && isGreen(prev) && isGreen(prev2) && getBody(last) > avgBody;
+  }
+  return false;
+}
+
+// ============= RECONOCIMIENTO DE PATRONES DE VELAS (PDF COMPLETO) =============
+
+// --- Funciones Auxiliares de Velas ---
+const isDoji = c => getBody(c) <= (c.h - c.l) * 0.1;
+
+const isSpinningTop = c => {
+  const body = getBody(c);
+  const total = c.h - c.l;
+  if (total === 0) return false;
+  return body > total * 0.1 && body < total * 0.5 && getUpperWick(c) > body && getLowerWick(c) > body;
+};
+
+const isMarubozu = c => {
+  const body = getBody(c);
+  const total = c.h - c.l;
+  if (total === 0) return false;
+  return body > total * 0.85; // Cuerpo ocupa más del 85%
+};
+
+// Martillo / Hombre Colgado (cuerpo pequeño arriba, mecha abajo larga)
+const isHammerLike = c => {
+  const body = getBody(c);
+  const lower = getLowerWick(c);
+  const upper = getUpperWick(c);
+  return lower >= body * 2 && upper <= body * 0.5;
+};
+
+// Estrella Fugaz / Martillo Invertido (cuerpo pequeño abajo, mecha arriba larga)
+const isInvertedHammerLike = c => {
+  const body = getBody(c);
+  const lower = getLowerWick(c);
+  const upper = getUpperWick(c);
+  return upper >= body * 2 && lower <= body * 0.5;
+};
+
+const hasGapUp = (curr, prev) => curr.o > prev.c;
+const hasGapDown = (curr, prev) => curr.o < prev.c;
+const getBodyMiddle = c => (c.o + c.c) / 2;
+
+// --- Detección de Patrones ---
+
+/**
+ * Analiza patrones de 1 vela
+ */
+function checkSingleCandlePattern(c, trend) {
+  if (isDoji(c)) {
+      // Libélula Doji (Dragonfly)
+      if (getLowerWick(c) > getBody(c) * 3 && getUpperWick(c) < getBody(c)) return { name: 'Libélula Doji', type: 'call', score: 3 };
+      // Lápida Doji (Gravestone)
+      if (getUpperWick(c) > getBody(c) * 3 && getLowerWick(c) < getBody(c)) return { name: 'Lápida Doji', type: 'put', score: 3 };
+      return { name: 'Doji (Indecisión)', type: 'neutral', score: 1 };
+  }
+  
+  if (isSpinningTop(c)) return { name: 'Peonza (Indecisión)', type: 'neutral', score: 1 };
+  
+  if (isMarubozu(c)) {
+    return { name: isGreen(c) ? 'Marubozu Alcista' : 'Marubozu Bajista', type: isGreen(c) ? 'call' : 'put', score: 3 };
+  }
+  
+  // Patrones de cambio dependientes de tendencia
+  if (isHammerLike(c)) {
+    if (trend === 'bearish') return { name: 'Martillo', type: 'call', score: 4 }; 
+    if (trend === 'bullish') return { name: 'Hombre Colgado', type: 'put', score: 3 };
+  }
+  
+  if (isInvertedHammerLike(c)) {
+    if (trend === 'bearish') return { name: 'Martillo Invertido', type: 'call', score: 2 }; 
+    if (trend === 'bullish') return { name: 'Estrella Fugaz', type: 'put', score: 4 };
+  }
+  
+  // Velas de onda alta (High Wave) - Indecisión fuerte
+  if (getUpperWick(c) > getBody(c)*2 && getLowerWick(c) > getBody(c)*2) {
+      return { name: 'Vela de Onda Alta', type: 'neutral', score: 1 };
+  }
+
+  return null;
+}
+
+/**
+ * Analiza patrones de 2 velas
+ */
+function checkTwoCandlePattern(curr, prev, trend) {
+  // Engulfing (Envolvente)
+  if (isRed(prev) && isGreen(curr) && curr.c > prev.o && curr.o < prev.c) {
+    return { name: 'Envolvente Alcista', type: 'call', score: 5 };
+  }
+  if (isGreen(prev) && isRed(curr) && curr.c < prev.o && curr.o > prev.c) {
+    return { name: 'Envolvente Bajista', type: 'put', score: 5 };
+  }
+  
+  // Harami
+  if (isRed(prev) && isGreen(curr) && curr.h < prev.o && curr.l > prev.c) {
+     return { name: 'Harami Alcista', type: 'call', score: 3 };
+  }
+  if (isGreen(prev) && isRed(curr) && curr.h < prev.c && curr.l > prev.o) {
+     return { name: 'Harami Bajista', type: 'put', score: 3 };
+  }
+  
+  // Piercing Line (Pauta Penetrante)
+  if (trend === 'bearish' && isRed(prev) && isGreen(curr) && 
+      curr.o < prev.l && curr.c > getBodyMiddle(prev) && curr.c < prev.o) {
+    return { name: 'Pauta Penetrante', type: 'call', score: 4 };
+  }
+  
+  // Dark Cloud Cover (Cubierta Nube Oscura)
+  if (trend === 'bullish' && isGreen(prev) && isRed(curr) && 
+      curr.o > prev.h && curr.c < getBodyMiddle(prev) && curr.c > prev.o) {
+    return { name: 'Cubierta Nube Oscura', type: 'put', score: 4 };
+  }
+  
+  // Tweezers (Pinzas)
+  const tolerance = (curr.h - curr.l) * 0.05;
+  if (Math.abs(curr.l - prev.l) < tolerance && trend === 'bearish') {
+    return { name: 'Suelo en Pinzas', type: 'call', score: 4 };
+  }
+  if (Math.abs(curr.h - prev.h) < tolerance && trend === 'bullish') {
+    return { name: 'Techo en Pinzas', type: 'put', score: 4 };
+  }
+
+  // Coz (Kicking)
+  if (isMarubozu(prev) && isMarubozu(curr)) {
+      if (isRed(prev) && isGreen(curr) && hasGapUp(curr, prev)) return { name: 'Coz Alcista', type: 'call', score: 5};
+      if (isGreen(prev) && isRed(curr) && hasGapDown(curr, prev)) return { name: 'Coz Bajista', type: 'put', score: 5};
+  }
+
+  // On Neck Line (Bajista)
+  if (trend === 'bearish' && isRed(prev) && isGreen(curr) && 
+      hasGapDown(curr, prev) && Math.abs(curr.c - prev.l) < tolerance) {
+      return { name: 'On Neck Line', type: 'put', score: 3 }; // Continuación bajista
+  }
+
+  // Separadas (Separating Lines) - Continuación
+  if (trend === 'bullish' && isRed(prev) && isGreen(curr) && Math.abs(curr.o - prev.o) < tolerance) {
+      return { name: 'Separadas Alcistas', type: 'call', score: 3 };
+  }
+  if (trend === 'bearish' && isGreen(prev) && isRed(curr) && Math.abs(curr.o - prev.o) < tolerance) {
+      return { name: 'Separadas Bajistas', type: 'put', score: 3 };
+  }
+  
+  return null;
+}
+
+/**
+ * Analiza patrones de 3 velas
+ */
+function checkThreeCandlePattern(curr, prev, prev2, trend) {
+  // Morning Star (Estrella de la Mañana)
+  if (isRed(prev2) && getBody(prev2) > getAvgBody([prev2]) && 
+      getBody(prev) < getBody(prev2) * 0.4 && // Vela media pequeña
+      isGreen(curr) && curr.c > getBodyMiddle(prev2)) {
+      return { name: 'Estrella de la Mañana', type: 'call', score: 5 };
+  }
+  
+  // Evening Star (Estrella Vespertina)
+  if (isGreen(prev2) && getBody(prev2) > getAvgBody([prev2]) && 
+      getBody(prev) < getBody(prev2) * 0.4 && 
+      isRed(curr) && curr.c < getBodyMiddle(prev2)) {
+      return { name: 'Estrella Vespertina', type: 'put', score: 5 };
+  }
+  
+  // Three White Soldiers
+  if (trend === 'bearish' && 
+      isGreen(prev2) && isGreen(prev) && isGreen(curr) &&
+      prev.c > prev2.c && curr.c > prev.c &&
+      prev.o > prev2.o && prev.o < prev2.c &&
+      curr.o > prev.o && curr.o < prev.c &&
+      !isDoji(prev2) && !isDoji(prev) && !isDoji(curr)) {
+      return { name: 'Tres Soldados Blancos', type: 'call', score: 5 };
+  }
+  
+  // Three Black Crows
+  if (trend === 'bullish' && 
+      isRed(prev2) && isRed(prev) && isRed(curr) &&
+      prev.c < prev2.c && curr.c < prev.c &&
+      prev.o < prev2.o && prev.o > prev2.c &&
+      curr.o < prev.o && curr.o > prev.c &&
+      !isDoji(prev2) && !isDoji(prev) && !isDoji(curr)) {
+      return { name: 'Tres Cuervos Negros', type: 'put', score: 5 };
+  }
+  
+  // Variantes Doji Star
+  if (isRed(prev2) && isDoji(prev) && isGreen(curr) && curr.c > getBodyMiddle(prev2)) {
+      return { name: 'Estrella Doji de la Mañana', type: 'call', score: 5 };
+  }
+  if (isGreen(prev2) && isDoji(prev) && isRed(curr) && curr.c < getBodyMiddle(prev2)) {
+      return { name: 'Estrella Doji Vespertina', type: 'put', score: 5 };
+  }
+
+  // Bebé Abandonado (Gaps claros a ambos lados del Doji)
+  if (isRed(prev2) && isDoji(prev) && isGreen(curr) && 
+      prev.h < prev2.l && prev.h < curr.l) { 
+      return { name: 'Bebé Abandonado Alcista', type: 'call', score: 6 };
+  }
+  if (isGreen(prev2) && isDoji(prev) && isRed(curr) && 
+      prev.l > prev2.h && prev.l > curr.h) { 
+      return { name: 'Bebé Abandonado Bajista', type: 'put', score: 6 };
+  }
+
+  // Three Inside Up/Down (Confirmación de Harami)
+  // Up: Harami Alcista + 3ra vela verde cierra mas arriba
+  if (isRed(prev2) && isGreen(prev) && isGreen(curr) && 
+      prev.h < prev2.o && prev.l > prev2.c && // Harami
+      curr.c > prev2.o) { // Confirmación
+      return { name: 'Tres Velas Interiores Alcistas', type: 'call', score: 5 };
+  }
+  // Down: Harami Bajista + 3ra vela roja cierra mas abajo
+  if (isGreen(prev2) && isRed(prev) && isRed(curr) && 
+      prev.h < prev2.c && prev.l > prev2.o && // Harami
+      curr.c < prev2.o) { // Confirmación
+      return { name: 'Tres Velas Interiores Bajistas', type: 'put', score: 5 };
+  }
+
+  // Three Outside Up/Down (Confirmación de Engulfing)
+  // Up: Engulfing Alcista + 3ra vela verde
+  if (isRed(prev2) && isGreen(prev) && prev.c > prev2.o && prev.o < prev2.c && // Engulfing
+      isGreen(curr) && curr.c > prev.c) {
+      return { name: 'Tres Velas Exteriores Alcistas', type: 'call', score: 5 };
+  }
+  // Down: Engulfing Bajista + 3ra vela roja
+  if (isGreen(prev2) && isRed(prev) && prev.c < prev2.o && prev.o > prev2.c && // Engulfing
+      isRed(curr) && curr.c < prev.c) {
+      return { name: 'Tres Velas Exteriores Bajistas', type: 'put', score: 5 };
+  }
+
+  return null;
+}
+
+// ============= DETECCIÓN DE SEÑALES (MEJORADA V13 - PDF + MOMENTUM + BREAKOUTS) =============
+function detectSignal(liveCandle) {
+  // LOGS DE DEPURACIÓN DE BLOQUEOS
+  if (isStopPending) {
+      if (Math.random() < 0.05) logMonitor('🚫 Señales bloqueadas: Stop Pendiente', 'info');
+      return null;
+  }
+  if (pendingTrades.length > 0) {
+      if (!tradeExecutedThisCandle && Math.random() < 0.05) logMonitor(`⏳ Esperando resultado trade (${pendingTrades.length})...`, 'info');
+      return null;
+  }
+  if (activeMartingaleTrade) {
+      // Prioridad MG
+      return null;
+  }
+
+  // V12: Verificar estado de warmup
+  checkWarmupStatus();
+
+  // V12: No operar si el sistema no está 100% listo
+  if (!isSystemWarmedUp) {
+    return null;
+  }
+
+  const baseCandles = getAnalysisCandles();
+  const analysisCandles = [...baseCandles];
+
+  if (liveCandle && !config.operateOnNext) {
+    analysisCandles.push(liveCandle);
+  }
+
+  if (analysisCandles.length < 5) return null;
+
+  const i = analysisCandles.length - 1;
+  const now = analysisCandles[i];
+  const prev = analysisCandles[i - 1];
+  const prev2 = analysisCandles[i - 2];
+
+  const currentTime = Date.now();
+  if (!isCandleClosed(prev, currentTime)) {
+    return null;
+  }
+
+  const { supports, resistances } = getLevels(analysisCandles, i);
+  const nearSupport = isNearLevel(now.l, supports);
+  const nearResistance = isNearLevel(now.h, resistances);
+
+  // Detectar Momentum
+  const momentumBullish = isStrongMomentum(analysisCandles, 'bullish');
+  const momentumBearish = isStrongMomentum(analysisCandles, 'bearish');
+
+  let signal = null;
+  let strategy = '';
+  
+  // --- 1. DETECCIÓN DE PATRONES DE VELA (REVERSIÓN) ---
+  
+  // 3 Velas
+  const p3 = checkThreeCandlePattern(now, prev, prev2, currentTrend);
+  if (p3) {
+      signal = p3.type;
+      strategy = p3.name;
+  }
+  
+  // 2 Velas
+  if (!signal) {
+      const p2 = checkTwoCandlePattern(now, prev, currentTrend);
+      if (p2) {
+          signal = p2.type;
+          strategy = p2.name;
+      }
+  }
+  
+  // 1 Vela (Solo con S/R)
+  if (!signal) {
+      const p1 = checkSingleCandlePattern(now, currentTrend);
+      if (p1) {
+          if ((p1.type === 'call' && nearSupport) || (p1.type === 'put' && nearResistance)) {
+              signal = p1.type;
+              strategy = p1.name + ' (en Zona)';
+          }
+      }
+  }
+
+  // Falsa Ruptura (Price Action)
+  if (!signal) {
+    if (supports.some(s => now.l < s && now.c > s && isRed(prev))) {
+      signal = 'call'; strategy = 'Falsa Ruptura Soporte';
+    } else if (resistances.some(r => now.h > r && now.c < r && isGreen(prev))) {
+      signal = 'put'; strategy = 'Falsa Ruptura Resistencia';
+    }
+  }
+
+  // === FILTRO DE MOMENTUM PARA REVERSIONES ===
+  // Si detectamos una señal de reversión, verificamos que no vayamos contra un tren fuerte
+  if (signal) {
+      if (signal === 'call' && momentumBearish) {
+          logMonitor(`⚠️ Señal CALL anulada por Momentum Bajista`, 'info');
+          signal = null;
+      } else if (signal === 'put' && momentumBullish) {
+          logMonitor(`⚠️ Señal PUT anulada por Momentum Alcista`, 'info');
+          signal = null;
+      }
+  }
+
+  // --- 2. DETECCIÓN DE RUPTURAS VÁLIDAS (CONTINUACIÓN) ---
+  // Si no hay señal de reversión, buscamos Breakouts a favor del movimiento
+  if (!signal) {
+      const avgBody = getAvgBody(baseCandles);
+      
+      // Ruptura de Resistencia (CALL)
+      // Buscamos una resistencia que haya sido cruzada y cerrada por encima
+      const brokenRes = resistances.find(r => prev.c <= r && now.c > r); 
+      if (brokenRes) {
+          const bodySize = getBody(now);
+          // Validar fuerza: Cuerpo grande, cierra cerca del máximo
+          if (bodySize > avgBody * 1.2 && getUpperWick(now) < bodySize * 0.3) {
+              signal = 'call';
+              strategy = 'Ruptura de Resistencia (Breakout)';
+          }
+      }
+
+      // Ruptura de Soporte (PUT)
+      const brokenSup = supports.find(s => prev.c >= s && now.c < s);
+      if (brokenSup) {
+          const bodySize = getBody(now);
+          // Validar fuerza: Cuerpo grande, cierra cerca del mínimo
+          if (bodySize > avgBody * 1.2 && getLowerWick(now) < bodySize * 0.3) {
+              signal = 'put';
+              strategy = 'Ruptura de Soporte (Breakout)';
+          }
+      }
+  }
+  
+  if (signal) {
+    let displayType = signal;
+    let note = '';
+    if (config.invertTrade) {
+      displayType = signal === 'call' ? 'put' : 'call';
+      note = ' (INV)';
+    }
+
+    const trendTag = currentTrend !== 'neutral' ? ` [${currentTrend.toUpperCase()}]` : '';
+    logMonitor(`🚀 ${strategy} → ${displayType.toUpperCase()}${note}${trendTag}`, 'pattern');
+
+    return { d: signal, strategy: strategy };
+  }
+  return null;
+}
+
+// ============= PROCESAMIENTO DE TICKS =============
+function onTick(data) {
+  if (!isRunning) return;
+  
+  updateConnectionUI(true);
+  
+  if (DOM.uiPrice) {
+    DOM.uiPrice.textContent = data.closePrice.toFixed(2);
+    DOM.uiPrice.className = currentCandle && data.closePrice > currentCandle.o ? 'live-price price-up' : 'live-price price-down';
+  }
+  if (DOM.uiActive) DOM.uiActive.textContent = data.pair;
+  
+  // Actualizar warmup UI
+  updateWarmupUI();
+
+  // Validación de Tiempo (Time Violation Protection)
+  if (currentCandle && data.time < currentCandle.s) {
+      // Ignorar tick del pasado para evitar corrupción de velas
+      return;
+  }
+  
+  // Cambio de activo
+  if (currentPair !== data.pair) {
+    currentPair = data.pair;
+    candles = [];
+    currentCandle = null;
+    pendingTrades = [];
+    processed = 0;
+    logMonitor(`Activo: ${currentPair}`, 'info');
+    
+    // Cargar histórico para el nuevo activo (Ahora vacío por eliminación de API)
+    loadHistoricalData(currentPair).then(hist => {
+      if (hist.length > 0) {
+        candles = hist;
+        processed = hist.length;
+      }
+    });
+  }
+  
+  const timestamp = data.time;
+  const candleTime = Math.floor(timestamp / 60000) * 60000;
+  
+  if (!currentCandle) {
+    currentCandle = {
+      s: candleTime, o: data.closePrice, h: data.closePrice,
+      l: data.closePrice, c: data.closePrice, v: data.volume
+    };
+  } else if (timestamp >= currentCandle.s + 60000) {
+    // Cerrar vela
+    candles.push({ ...currentCandle });
+    if (candles.length > MAX_CANDLES) candles.shift();
+    
+    processed++;
+    
+    checkTradeResults(currentCandle);
+    checkSafeStop(); // Verificar si podemos parar después de cerrar vela y procesar resultados
+    
+    if (config.operateOnNext) {
+      pendingSignal = detectSignal();
+    } else {
+      pendingSignal = null;
+    }
+    
+    tradeExecutedThisCandle = false;
+    lastTradeType = null;
+    
+    currentCandle = {
+      s: candleTime, o: data.closePrice, h: data.closePrice,
+      l: data.closePrice, c: data.closePrice, v: data.volume
+    };
+    
+    // Martingala V12: Verificar condiciones antes de ejecutar
+    // NOTA: Si isStopPending es true, AÚN ASÍ ejecutamos martingala para intentar recuperar
+    if (activeMartingaleTrade && config.useMartingale) {
+      // Prioridad absoluta a la Martingala: No buscar nuevas señales
+      pendingSignal = null;
+      
+      // Mostrar en UI que estamos evaluando Martingala
+      if (DOM.signalBox) {
+         DOM.signalBox.className = 'sig-waiting';
+         DOM.signalStatus.innerHTML = `
+           <div class="signal-title" style="color:#ffff00;font-size:12px">EVALUANDO MARTINGALA</div>
+           <div class="signal-subtitle" style="color:#fff;font-size:10px">Verificando probabilidad...</div>`;
+      }
+
+      // Evaluar si ejecutar
+      if (shouldExecuteMartingale(activeMartingaleTrade.type)) {
+        logMonitor(`⚡ Ejecutando Martingala Nivel ${mgLevel}`, 'success');
+        if (config.autoTrade) {
+            // Pequeño delay para asegurar apertura de vela
+            setTimeout(() => {
+                executeTrade(activeMartingaleTrade.type);
+                // Registrar trade pendiente
+                const entryPrice = getCurrentPrice();
+                // Usar tiempo de la vela actual para el key, asegurando seguimiento
+                pendingTrades.push({ k: currentCandle.s, type: activeMartingaleTrade.type, entryPrice: entryPrice });
+                tradeExecutedThisCandle = true;
+                lastTradeType = activeMartingaleTrade.type;
+                activeMartingaleTrade = null; // Consumir la martingala
+            }, 500);
+        } else {
+             activeMartingaleTrade = null; // Si no es autotrade, cancelar mg
+        }
+      } else {
+        // Martingala cancelada por condiciones desfavorables - Asumir pérdida
+        // Se resetea el nivel, se cuenta la pérdida y se informa
+        mgLevel = 0;
+        stats.l++;
+        sessionStats.l++; // Contar la pérdida original que estaba "en espera" de recuperación
+        logMonitor('⛔ Martingala cancelada - Riesgo alto detectado', 'blocked');
+        logMonitor('🛡️ Pérdida asumida para proteger capital', 'info');
+        activeMartingaleTrade = null;
+      }
+    }
+  } else {
+    currentCandle.c = data.closePrice;
+    currentCandle.h = Math.max(currentCandle.h, data.closePrice);
+    currentCandle.l = Math.min(currentCandle.l, data.closePrice);
+    currentCandle.v = data.volume;
+    
+    if (!config.operateOnNext) {
+      const signal = detectSignal(currentCandle);
+      pendingSignal = signal || null;
+    }
+  }
+  
+  const now = Date.now() + config.timeOffset;
+  const sec = Math.ceil((60000 - (now % 60000)) / 1000);
+  updateSignalUI(sec, currentCandle.s);
+}
+
+// ============= UI DE SEÑALES (CYBERPUNK STYLE) =============
+function updateSignalUI(sec, key) {
+  if (!DOM.signalBox || !DOM.signalStatus) return;
+
+  // V12: Si el sistema no está listo, mostrar estado de carga
+  if (!isSystemWarmedUp) {
+    DOM.signalBox.className = 'sig-waiting';
+    DOM.signalStatus.innerHTML = `
+      <div class="signal-title" style="color:#ff00ff;font-size:12px">CARGANDO SISTEMA</div>
+      <div class="signal-subtitle" style="color:#00ffff;font-size:9px">Esperando ${TARGET_CANDLES_FULL} velas...</div>`;
+    return;
+  }
+
+  // Comprobación de trade activo (vela actual o pendiente)
+  if (tradeExecutedThisCandle || pendingTrades.length > 0) {
+    const isCall = lastTradeType === 'call';
+    DOM.signalBox.className = isCall ? 'sig-possible-call' : 'sig-possible-put';
+    DOM.signalStatus.innerHTML = `
+      <div class="signal-title" style="color:${isCall ? '#00ff88' : '#ff0080'};font-size:14px">${isCall ? '▲ COMPRA' : '▼ VENTA'}</div>
+      <div class="signal-subtitle" style="font-size:10px">ESPERANDO RESULTADO...</div>`;
+    return;
+  }
+
+  if (pendingSignal) {
+    let type = pendingSignal.d;
+    if (config.invertTrade) type = type === 'call' ? 'put' : 'call';
+
+    const isCall = type === 'call';
+    const triggerSec = 60 - config.entrySec;
+    const windowSize = config.entryWindowSec || 3;
+
+    if (sec <= triggerSec && sec > (triggerSec - windowSize)) {
+      DOM.signalBox.className = isCall ? 'sig-entry-call' : 'sig-entry-put';
+      DOM.signalStatus.innerHTML = `
+        <div class="signal-title" style="color:${isCall ? '#00ff88' : '#ff0080'};font-size:16px">${isCall ? '▲▲ COMPRA ▲▲' : '▼▼ VENTA ▼▼'}</div>
+        <div class="entry-countdown" style="color:${isCall ? '#00ff88' : '#ff0080'}">¡¡ ENTRAR AHORA !!</div>
+        <div style="font-size:9px;margin-top:4px;color:#fff">${currentTrend.toUpperCase()}</div>`;
+
+      if (!tradeExecutedThisCandle) {
+        tradeExecutedThisCandle = true;
+        lastTradeType = type;
+        const tKey = key + 60000;
+        if (!pendingTrades.some(t => t.k === tKey)) {
+          const entryPrice = getCurrentPrice();
+          pendingTrades.push({ k: tKey, type: type, entryPrice: entryPrice });
+          if (config.autoTrade) executeTrade(type);
+          else logMonitor(`Señal manual: ${type.toUpperCase()} @ ${entryPrice}`, 'success');
+        }
+      }
+    } else {
+      DOM.signalBox.className = 'sig-anticipation';
+      DOM.signalStatus.innerHTML = `
+        <div class="anticipation-badge" style="color:${isCall ? '#00ff88' : '#ff0080'};padding:4px 10px">
+          PREPARAR ${isCall ? '▲ CALL' : '▼ PUT'}
+        </div>
+        <div style="font-size:11px;margin-top:6px;color:#fff">Entrada: <span style="color:#ffff00;font-weight:700">${sec}s</span></div>
+        <div style="font-size:9px;margin-top:2px;color:#aaa">ESPERANDO OPORTUNIDAD</div>`;
+    }
+  } else {
+    // Si hay parada pendiente, mostrar en UI
+    if (isStopPending) {
+        DOM.signalBox.className = 'sig-waiting';
+        DOM.signalStatus.innerHTML = `
+        <div class="signal-title" style="color:#ffff00;font-size:11px">FINALIZANDO</div>
+        <div class="signal-subtitle" style="color:#fff;font-size:9px">Cerrando ciclo...</div>`;
+    } else {
+        DOM.signalBox.className = 'sig-waiting';
+        DOM.signalStatus.innerHTML = `
+        <div class="signal-title" style="color:#00ffff;font-size:11px">ANALIZANDO MERCADO</div>
+        <div class="signal-subtitle" style="color:#888;font-size:9px">Buscando oportunidades...</div>`;
+    }
+  }
+}
+
+// ============= ACTUALIZACIÓN PERIÓDICA DE UI =============
+let uiUpdateInterval = null;
+
+function updateBotUI() {
+  if (!isRunning) {
+    // Bot detenido - mostrar mensaje inicial
+    if (DOM.signalBox && DOM.signalStatus) {
+      DOM.signalBox.className = 'sig-waiting';
+      DOM.signalStatus.innerHTML = `
+        <div class="signal-title" style="color:#00ffff;font-size:11px">INICIAR PARA ANALIZAR</div>
+        <div class="signal-subtitle" style="color:#888;font-size:9px">Presiona el botón para comenzar</div>`;
+    }
+    return;
+  }
+
+  // Bot corriendo - verificar estado de warmup y actualizar UI
+  checkWarmupStatus(); // Actualizar nivel de warmup
+  updateWarmupUI();
+
+  // Actualizar timer
+  const now = Date.now() + config.timeOffset;
+  const sec = Math.ceil((60000 - (now % 60000)) / 1000);
+
+  if (DOM.timerText) {
+    DOM.timerText.textContent = `⏱ Cierre: ${sec}s`;
+  }
+  if (DOM.timerFill) {
+    const pct = ((60 - sec) / 60) * 100;
+    DOM.timerFill.style.width = `${pct}%`;
+    DOM.timerFill.style.background = sec <= 5 ? '#ff0080' : sec <= 15 ? '#ffff00' : '#00ffff';
+  }
+
+  // Actualizar runtime
+  if (DOM.uiRuntime && startTime > 0) {
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    const h = Math.floor(elapsed / 3600);
+    const m = Math.floor((elapsed % 3600) / 60);
+    DOM.uiRuntime.textContent = `${h.toString().padStart(2,'0')}h ${m.toString().padStart(2,'0')}m`;
+  }
+
+  // Actualizar Signal Box basado en estado
+  if (DOM.signalBox && DOM.signalStatus) {
+    if (isStopPending && !tradeExecutedThisCandle && pendingTrades.length === 0 && !activeMartingaleTrade) {
+         // Stop pending sin operaciones -> Esperando que checkSafeStop actúe, pero visualmente útil
+         // (Aunque checkSafeStop debería detenerlo casi inmediatamente)
+    } else if (!isSystemWarmedUp) {
+      // Sistema cargando
+      DOM.signalBox.className = 'sig-waiting';
+      const analysisCandles = getAnalysisCandles();
+      DOM.signalStatus.innerHTML = `
+        <div class="signal-title" style="color:#ff00ff;font-size:12px">CARGANDO SISTEMA</div>
+        <div class="signal-subtitle" style="color:#00ffff;font-size:9px">${systemWarmupLevel}% - ${analysisCandles.length}/${TARGET_CANDLES_FULL} velas</div>`;
+    } else if (tradeExecutedThisCandle || pendingTrades.length > 0) {
+      // Trade en progreso
+      const isCall = lastTradeType === 'call';
+      DOM.signalBox.className = isCall ? 'sig-possible-call' : 'sig-possible-put';
+      DOM.signalStatus.innerHTML = `
+        <div class="signal-title" style="color:${isCall ? '#00ff88' : '#ff0080'};font-size:14px">${isCall ? '▲ COMPRA' : '▼ VENTA'}</div>
+        <div class="signal-subtitle" style="font-size:10px">ESPERANDO RESULTADO...</div>`;
+    } else if (pendingSignal) {
+      // Hay señal pendiente - esto se manejará en updateSignalUI con los segundos correctos
+      // No hacer nada aquí para no sobreescribir
+    } else {
+        // Estado normal o Stop Pending visualizado en updateSignalUI
+    }
+  }
+}
+
+function startUIUpdateLoop() {
+  if (uiUpdateInterval) clearInterval(uiUpdateInterval);
+  // Actualizar UI cada 500ms para respuesta rápida
+  uiUpdateInterval = setInterval(updateBotUI, 500);
+  // También actualizar inmediatamente
+  updateBotUI();
+}
+
+function stopUIUpdateLoop() {
+  if (uiUpdateInterval) {
+    clearInterval(uiUpdateInterval);
+    uiUpdateInterval = null;
+  }
+  // Actualizar UI una última vez para mostrar estado detenido
+  updateBotUI();
+}
+
+// ============= FUNCIÓN DE DIAGNÓSTICO EXHAUSTIVO V15 =============
+function runDiagnostics() {
+  logMonitor('🔍 === DIAGNÓSTICO PROFUNDO ===', 'info');
+  
+  // 1. ANÁLISIS DE BOTONES DE TRADING
+  logMonitor('🖱️ Analizando Botones de Trading...', 'info');
+  
+  const buttons = Array.from(document.querySelectorAll('button'));
+  const buyBtn = buttons.find(b => b.classList.contains('buy-button') || b.textContent.includes('ARRIBA'));
+  const sellBtn = buttons.find(b => b.classList.contains('sell-button') || b.textContent.includes('ABAJO'));
+  
+  if (buyBtn) {
+      const rect = buyBtn.getBoundingClientRect();
+      const isVisible = rect.width > 0 && rect.height > 0;
+      const isDisabled = buyBtn.disabled || buyBtn.getAttribute('aria-disabled') === 'true';
+      logMonitor(`✅ Botón CALL encontrado:`, 'success');
+      logMonitor(`   Clases: ${buyBtn.className}`, 'info');
+      logMonitor(`   Visible: ${isVisible} | Disabled: ${isDisabled}`, isVisible && !isDisabled ? 'success' : 'blocked');
+      // Auto-Test de Hover
+      buyBtn.dispatchEvent(new MouseEvent('mouseover', {bubbles:true}));
+  } else {
+      logMonitor('❌ CRÍTICO: Botón CALL NO encontrado en DOM', 'blocked');
+  }
+
+  if (sellBtn) {
+      const rect = sellBtn.getBoundingClientRect();
+      const isVisible = rect.width > 0 && rect.height > 0;
+      const isDisabled = sellBtn.disabled || sellBtn.getAttribute('aria-disabled') === 'true';
+      logMonitor(`✅ Botón PUT encontrado:`, 'success');
+      logMonitor(`   Clases: ${sellBtn.className}`, 'info');
+      logMonitor(`   Visible: ${isVisible} | Disabled: ${isDisabled}`, isVisible && !isDisabled ? 'success' : 'blocked');
+  } else {
+      logMonitor('❌ CRÍTICO: Botón PUT NO encontrado en DOM', 'blocked');
+  }
+
+  // 2. ESTADO INTERNO DEL BOT
+  logMonitor('🧠 Estado Lógico del Bot:', 'info');
+  logMonitor(`   AutoTrade: ${config.autoTrade ? 'ON' : 'OFF'}`, config.autoTrade ? 'success' : 'blocked');
+  logMonitor(`   Stop Pendiente: ${isStopPending ? 'SÍ' : 'NO'}`, isStopPending ? 'blocked' : 'success');
+  logMonitor(`   Trades Pendientes: ${pendingTrades.length}`, pendingTrades.length > 0 ? 'pattern' : 'info');
+  logMonitor(`   Martingala Activa: ${activeMartingaleTrade ? 'SÍ' : 'NO'}`, activeMartingaleTrade ? 'pattern' : 'info');
+  logMonitor(`   Warmup: ${systemWarmupLevel}% (${isSystemWarmedUp ? 'Listo' : 'Cargando'})`, isSystemWarmedUp ? 'success' : 'pattern');
+
+  // 3. DATOS DE MERCADO
+  logMonitor('📈 Datos de Mercado:', 'info');
+  logMonitor(`   Velas procesadas: ${candles.length}`, 'info');
+  if (currentCandle) {
+      logMonitor(`   Vela Actual: O:${currentCandle.o} C:${currentCandle.c}`, 'info');
+  }
+  
+  logMonitor('=================================', 'info');
+}
+
+// ============= HELPER DE EJECUCIÓN CON LOGS =============
+function executeTradeWithRetry(type, maxRetries) {
+  logMonitor(`⚡ INICIANDO PROTOCOLO DE EJECUCIÓN: ${type.toUpperCase()}`, 'info');
+  
+  const selector = type === 'call' ? '.buy-button' : '.sell-button';
+  
+  const attemptClick = (retriesLeft) => {
+      // DIAGNÓSTICO EN TIEMPO REAL
+      const allButtons = document.querySelectorAll('button');
+      const btn = document.querySelector(selector);
+      
+      if (!btn) {
+          logMonitor(`🔍 Búsqueda ${type}: Selector '${selector}' falló. Total botones en pág: ${allButtons.length}`, 'blocked');
+      }
+      
+      if (btn) {
+          // Estado visual del botón
+          const rect = btn.getBoundingClientRect();
+          const isVisible = rect.width > 0 && rect.height > 0;
+          
+          if (!isVisible) {
+              logMonitor(`⚠️ ALERTA: Botón ${type} encontrado pero invisible (0x0)`, 'blocked');
+          }
+          
+          if (btn.disabled) {
+              logMonitor(`⚠️ ALERTA: Botón ${type} deshabilitado (disabled attr)`, 'blocked');
+          }
+
+          logMonitor(`🎯 Botón ${type.toUpperCase()} DETECTADO y LISTO. Clickeando...`, 'success');
+          
+          try {
+              btn.style.border = '2px solid yellow'; // Feedback visual debug
+              btn.focus();
+              
+              // 1. Eventos Pointer (Modernos)
+              const pointerOpts = { bubbles: true, cancelable: true, view: window, buttons: 1, pointerId: 1, isPrimary: true };
+              btn.dispatchEvent(new PointerEvent('pointerdown', pointerOpts));
+              btn.dispatchEvent(new PointerEvent('pointerup', pointerOpts));
+              
+              // 2. Eventos Mouse (Legacy/React)
+              const mouseOpts = { bubbles: true, cancelable: true, view: window, buttons: 1 };
+              btn.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
+              btn.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
+              btn.dispatchEvent(new MouseEvent('click', mouseOpts));
+
+              // 3. Click Nativo
+              btn.click();
+              
+              setTimeout(() => btn.style.border = '', 500); // Limpiar debug
+              
+              logMonitor(`✅ COMANDO DE CLICK ENVIADO A ${type.toUpperCase()}`, 'success');
+              return true;
+          } catch(e) {
+              logMonitor(`⚠️ EXCEPCIÓN AL CLICKEAR: ${e.message}`, 'blocked');
+          }
+      } else {
+          if (retriesLeft > 0) {
+              logMonitor(`⏳ Reintentando buscar botón ${type}... (${retriesLeft})`, 'info');
+              setTimeout(() => attemptClick(retriesLeft - 1), 500);
+          } else {
+              logMonitor(`❌ ERROR FATAL: No se pudo clickear ${type.toUpperCase()} tras varios intentos.`, 'blocked');
+              
+              // Fallback Texto
+              logMonitor('🔄 Intentando fallback por TEXTO...', 'info');
+              const textToFind = type === 'call' ? 'ARRIBA' : 'ABAJO';
+              const fallbackBtn = Array.from(document.querySelectorAll('button'))
+                  .find(b => b.textContent.includes(textToFind));
+                  
+              if (fallbackBtn) {
+                  logMonitor(`⚠️ Botón por texto encontrado. Clickeando...`, 'pattern');
+                  fallbackBtn.click();
+              } else {
+                  logMonitor(`❌ Fallback también falló. Revisar DOM.`, 'blocked');
+              }
+          }
+      }
+  };
+  
+  attemptClick(maxRetries);
+}
+
 // ============= MESSAGE HANDLERS =============
 window.addEventListener('message', e => {
   if (e.data.type === 'SNIPER_TOGGLE_UI') {
     if (!isSystemReady) initSystem();
+    
     isVisible = !isVisible;
-    if (DOM.hud) DOM.hud.classList.toggle('visible', isVisible);
+    if (DOM.hud) {
+        DOM.hud.classList.toggle('visible', isVisible);
+        DOM.hud.style.display = isVisible ? 'flex' : 'none';
+    }
+    
     if (isVisible) readAccount();
-    else stopBot();
+    else stopBot(true);
   }
   
   if (e.data.type === 'SNIPER_CONNECTION_LOST') {
     wsConnected = false;
     updateConnectionUI(false);
     logMonitor('Conexión perdida', 'blocked');
+  }
+});
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window) return;
+  
+  if (event.data.type === 'SNIPER_CONFIG_LOADED' && event.data.config) {
+    const c = event.data.config;
+    // Merge profundo cuidadoso para stopConfig
+    if (c.stopConfig) {
+        config.stopConfig = { ...config.stopConfig, ...c.stopConfig };
+        delete c.stopConfig; // Ya procesado
+    }
+    config = { ...config, ...c };
+    applyConfigToUI();
+    logMonitor('Configuración restaurada', 'info');
   }
 });
 
