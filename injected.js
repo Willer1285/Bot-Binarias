@@ -12,11 +12,10 @@ const MAX_CANDLES = 200;
 const MAX_LOGS = 50; // Aumentado para ver más historial
 const HEALTH_CHECK_INTERVAL = 3000;
 const DATA_TIMEOUT = 8000;
-const WS_RECONNECT_DELAYS = [2000, 5000, 10000, 15000, 30000];
+const WS_RECONNECT_DELAYS = [500, 1000, 2000, 3000, 5000];
 const WS_MAX_RECONNECT_ATTEMPTS = 9999;
 const MIN_TREND_CANDLES = 5;
 const MIN_TRADE_INTERVAL = 5000;       // Mínimo 5 segundos entre trades
-const MAX_CONSECUTIVE_LOSSES = 5;      // Máximo de pérdidas consecutivas antes de pausa
 
 // ============= HUD HTML & CSS =============
 const HUD_HTML = `
@@ -363,6 +362,7 @@ let tickerInterval = null;
 let sessionInterval = null;
 let healthCheckInterval = null;
 let warmupInterval = null;
+let antiIdleInterval = null;
 
 // ============= FUNCIONES ESENCIALES RESTAURADAS =============
 
@@ -624,12 +624,6 @@ function executeTrade(type) {
     return false;
   }
 
-  if (consecutiveLosses >= MAX_CONSECUTIVE_LOSSES) {
-    logMonitor(`⛔ Pausa automática: ${consecutiveLosses} pérdidas consecutivas`, 'blocked');
-    logMonitor('Desactiva y activa AutoTrade para continuar', 'info');
-    return false;
-  }
-
   if (balance <= 0) {
     logMonitor('Balance insuficiente para operar', 'blocked');
     return false;
@@ -688,15 +682,7 @@ function checkTradeResults(candle) {
       } else if (!isDraw) {
         consecutiveLosses++;
         if (config.useMartingale) {
-          const stopLossTrigger = (t.type === 'call' && isStrongMomentum(candles, 'bearish')) ||
-                                  (t.type === 'put' && isStrongMomentum(candles, 'bullish'));
-          if (stopLossTrigger) {
-            stats.l++;
-            sessionStats.l++;
-            mgLevel = 0;
-            activeMartingaleTrade = null;
-            logMonitor(`⛔ Momentum en contra - Stop ${direction}${priceChange}%`, 'blocked');
-          } else if (mgLevel < config.mgMaxSteps) {
+          if (mgLevel < config.mgMaxSteps) {
             mgLevel++;
             activeMartingaleTrade = { type: t.type };
             logMonitor(`❌ PERDIDA ${direction}${priceChange}% - Martingala ${mgLevel}/${config.mgMaxSteps}`, 'blocked');
@@ -705,7 +691,7 @@ function checkTradeResults(candle) {
             sessionStats.l++;
             mgLevel = 0;
             activeMartingaleTrade = null;
-            logMonitor(`⛔ Max Martingala - Stop ${direction}${priceChange}%`, 'blocked');
+            logMonitor(`⛔ Max Martingala alcanzada - Ciclo perdido ${direction}${priceChange}%`, 'blocked');
           }
         } else {
           stats.l++;
@@ -792,21 +778,75 @@ function checkSafeStop() {
 }
 
 function shouldExecuteMartingale(tradeType) {
-  if (!isSystemWarmedUp) {
-    logMonitor('⏳ Martingala pausada - Sistema en warmup', 'info');
-    return false;
-  }
-
-  if (currentTrend === 'bullish' && tradeType === 'put') {
-    logMonitor('⚠️ Martingala cancelada - Tendencia alcista contra PUT', 'pattern');
-    return false;
-  }
-  if (currentTrend === 'bearish' && tradeType === 'call') {
-    logMonitor('⚠️ Martingala cancelada - Tendencia bajista contra CALL', 'pattern');
-    return false;
-  }
-
+  // Martingala siempre se ejecuta si está activa - sin restricciones
+  // El ciclo debe completarse según la configuración del usuario
   return true;
+}
+
+// ============= SISTEMA ANTI-INACTIVIDAD =============
+function startAntiIdle() {
+  if (antiIdleInterval) clearInterval(antiIdleInterval);
+
+  // Cada 30 segundos simular actividad humana para evitar que la página detecte inactividad
+  antiIdleInterval = setInterval(() => {
+    if (!isRunning) return;
+
+    try {
+      // 1. Mover el mouse en una posición aleatoria del gráfico
+      const chart = document.querySelector('canvas, [class*="chart"], [class*="trading-view"]');
+      const target = chart || document.body;
+      const rect = target.getBoundingClientRect();
+      const x = rect.left + Math.random() * rect.width;
+      const y = rect.top + Math.random() * rect.height;
+
+      target.dispatchEvent(new MouseEvent('mousemove', {
+        bubbles: true, clientX: x, clientY: y
+      }));
+
+      // 2. Simular scroll mínimo (1px) en el cuerpo de la página
+      window.scrollBy(0, 1);
+      setTimeout(() => window.scrollBy(0, -1), 100);
+
+      // 3. Disparar eventos de actividad que los detectores de inactividad escuchan
+      document.dispatchEvent(new Event('mousemove', { bubbles: true }));
+      document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Shift', code: 'ShiftLeft' }));
+      document.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Shift', code: 'ShiftLeft' }));
+
+      // 4. Mantener focus en la ventana
+      if (document.hasFocus && !document.hasFocus()) {
+        window.focus();
+      }
+
+      // 5. Prevenir Page Visibility API timeout
+      if (document.hidden) {
+        // Forzar un requestAnimationFrame para mantener el tab "activo"
+        requestAnimationFrame(() => {});
+      }
+
+    } catch(e) {}
+  }, 30000); // Cada 30 segundos
+
+  // Interceptar y bloquear beforeunload (evitar que la página se recargue sola)
+  window.addEventListener('beforeunload', function(e) {
+    if (isRunning) {
+      // Si el bot está corriendo, intentar prevenir la recarga
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  });
+
+  // Override del Page Visibility API para que la página crea que siempre está visible
+  try {
+    Object.defineProperty(document, 'hidden', { value: false, writable: false });
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', writable: false });
+  } catch(e) {}
+}
+
+function stopAntiIdle() {
+  if (antiIdleInterval) {
+    clearInterval(antiIdleInterval);
+    antiIdleInterval = null;
+  }
 }
 
 function startBot() {
@@ -840,6 +880,7 @@ function startBot() {
   }, HEALTH_CHECK_INTERVAL);
 
   startUIUpdateLoop();
+  startAntiIdle();
 
   // Diagnóstico inicial con pequeño delay
   setTimeout(() => runDiagnostics(), 500);
@@ -890,7 +931,8 @@ function stopBot(force = false) {
       clearInterval(healthCheckInterval);
       healthCheckInterval = null;
   }
-  
+
+  stopAntiIdle();
   stopUIUpdateLoop();
   
   // Resetear estados visuales
@@ -1273,19 +1315,27 @@ function checkWsHealth() {
   if (!isRunning) return;
 
   const timeSinceLastMessage = Date.now() - lastWsMessageTime;
-  const TIMEOUT_THRESHOLD = 3000; // 3 segundos sin datos es sospechoso
 
-  if (timeSinceLastMessage > TIMEOUT_THRESHOLD) {
-    if (wsConnected) {
-        logMonitor('⚠ Conexión inestable detectada...', 'pattern');
-        wsConnected = false;
-        updateConnectionUI(false);
+  // Verificar si el WebSocket real sigue abierto
+  if (activeWebSocket && activeWebSocket.readyState === WebSocket.OPEN) {
+    // Socket abierto - si llevamos >10s sin mensajes, enviar ping para mantener vivo
+    if (timeSinceLastMessage > 10000) {
+      try {
+        activeWebSocket.send('2');  // Ping de Socket.IO
+      } catch(e) {}
     }
-    
-    // Intentar reconectar proactivamente
-    if (!wsReconnectTimeout) {
-        scheduleReconnect();
-    }
+    return; // Socket abierto, no hay problema
+  }
+
+  // Socket cerrado o no existe - marcar desconectado y reconectar
+  if (wsConnected) {
+    logMonitor('⚠ Conexión perdida - reconectando...', 'pattern');
+    wsConnected = false;
+    updateConnectionUI(false);
+  }
+
+  if (!wsReconnectTimeout) {
+    scheduleReconnect();
   }
 }
 
@@ -1370,9 +1420,8 @@ function processWebSocketMessage(data) {
  */
 function scheduleReconnect() {
   if (wsReconnectTimeout) return;
-  if (!isRunning) return;
 
-  // Determinar delay basado en el intento actual
+  // Determinar delay basado en el intento actual (máx 5s)
   const delayIndex = Math.min(wsReconnectAttempt, WS_RECONNECT_DELAYS.length - 1);
   const delay = WS_RECONNECT_DELAYS[delayIndex];
 
@@ -1384,20 +1433,20 @@ function scheduleReconnect() {
     }
 
     wsReconnectAttempt++;
+    logMonitor(`🔄 Reconectando (intento ${wsReconnectAttempt})...`, 'info');
 
-    // ESTRATEGIA DE RECUPERACIÓN ESCALONADA (NUEVO V13)
-    // Si falla 3 veces seguidas, es probable que el token haya expirado.
-    // Forzamos recarga del gráfico para obtener nuevo token.
-    if (wsReconnectAttempt > 3) {
-        logMonitor(`🔄 Inestabilidad persistente: Reiniciando gráfico...`, 'pattern');
-        forceChartReconnect();
-        wsReconnectAttempt = 2; // Retroceder un poco para dar tiempo
-        return;
+    // Estrategia escalonada:
+    // 1-5: Reconexión directa con URL guardada
+    // 6-10: Buscar WebSocket activo en la página y clonar su URL
+    // 11+: Forzar que la página recree el WebSocket navegando al activo
+    if (wsReconnectAttempt <= 5) {
+      attemptDirectReconnect();
+    } else if (wsReconnectAttempt <= 10) {
+      attemptDiscoverReconnect();
+    } else {
+      attemptForcePageReconnect();
+      wsReconnectAttempt = 0; // Reiniciar ciclo
     }
-
-    logMonitor(`🔄 Reconectando (${wsReconnectAttempt})...`, 'info');
-    attemptDirectReconnect();
-
   }, delay);
 }
 
@@ -1405,52 +1454,75 @@ function scheduleReconnect() {
  * V12: Intenta reconectar directamente creando un nuevo WebSocket
  */
 function attemptDirectReconnect() {
-  // Si tenemos la URL guardada, intentar crear una nueva conexión
   if (lastWsUrl) {
     try {
-      // Al crear un new WebSocket, el interceptor lo capturará
-      // y configurará los listeners automáticamente.
-      // No necesitamos guardar la referencia aquí, el interceptor lo hará.
-      // Añadir timestamp para evitar caché
       const urlObj = new URL(lastWsUrl);
       urlObj.searchParams.set('_t', Date.now());
       new window.WebSocket(urlObj.toString(), lastWsProtocols);
       return;
-    } catch (e) {
-      // console.error('Error al reconectar:', e);
-    }
+    } catch (e) {}
   }
-
-  // Si falla, reintentar indefinidamente sin molestar al usuario con recargas
+  // Si no hay URL, pasar a siguiente estrategia
   scheduleReconnect();
 }
 
 /**
- * V12: Método de fallback - recarga el iframe del gráfico
+ * Estrategia 2: Buscar WebSockets activos en la página y clonar su configuración
  */
-function forceChartReconnect() {
-  // Buscar iframe del gráfico (suele tener src con 'chart' o ser el principal)
-  const chartFrames = document.querySelectorAll('iframe');
-  let targetFrame = null;
-
-  for (const frame of chartFrames) {
-      if (frame.src && (frame.src.includes('chart') || frame.src.includes('tradingview'))) {
-          targetFrame = frame;
-          break;
+function attemptDiscoverReconnect() {
+  try {
+    // Buscar en el store de Worbit la URL del WS actual
+    const symbolStore = localStorage.getItem('symbol-store');
+    if (symbolStore) {
+      const parsed = JSON.parse(symbolStore);
+      const symbol = parsed?.state?.symbolSelected;
+      if (symbol) {
+        logMonitor(`🔍 Redescubriendo WS para ${symbol}...`, 'info');
+        // Forzar cambio de símbolo para que la página recree el WS
+        // Hacer click en el activo actual para refrescar la suscripción
+        const activeItem = document.querySelector('[class*="symbol-item"][class*="active"], [class*="pair-item"][class*="selected"]');
+        if (activeItem) {
+          activeItem.click();
+          return;
+        }
       }
-  }
-
-  if (targetFrame) {
-    try {
-      // Recargar iframe
-      targetFrame.src = targetFrame.src;
-      logMonitor('✓ Gráfico recargado', 'success');
-    } catch(e) {
-      logMonitor('⚠ Error recargando gráfico', 'info');
     }
-  } else {
-      logMonitor('⚠ No se encontró frame de gráfico', 'info');
-  }
+  } catch(e) {}
+  scheduleReconnect();
+}
+
+/**
+ * Estrategia 3: Forzar que la página recree sus conexiones WebSocket
+ */
+function attemptForcePageReconnect() {
+  logMonitor('🔄 Forzando reconexión de página...', 'pattern');
+  try {
+    // Método 1: Recargar iframe del gráfico
+    const chartFrames = document.querySelectorAll('iframe');
+    for (const frame of chartFrames) {
+      if (frame.src && (frame.src.includes('chart') || frame.src.includes('tradingview'))) {
+        frame.src = frame.src;
+        logMonitor('✓ Gráfico recargado', 'success');
+        return;
+      }
+    }
+
+    // Método 2: Simular cambio de activo para forzar nueva suscripción WS
+    const pairItems = document.querySelectorAll('[class*="symbol-item"], [class*="pair-item"], [class*="asset-item"]');
+    if (pairItems.length > 1) {
+      // Click en otro activo y luego volver al original
+      const otherItem = pairItems[1];
+      otherItem.click();
+      setTimeout(() => {
+        pairItems[0].click();
+        logMonitor('✓ Activo refrescado', 'success');
+      }, 2000);
+      return;
+    }
+
+    logMonitor('⚠ Reconexión forzada sin resultado - reintentando...', 'info');
+  } catch(e) {}
+  scheduleReconnect();
 }
 
 function updateConnectionUI(connected) {
@@ -2075,33 +2147,21 @@ function onTick(data) {
            <div class="signal-subtitle" style="color:#fff;font-size:10px">Verificando probabilidad...</div>`;
       }
 
-      // Evaluar si ejecutar
-      if (shouldExecuteMartingale(activeMartingaleTrade.type)) {
-        logMonitor(`⚡ Ejecutando Martingala Nivel ${mgLevel}`, 'success');
-        if (config.autoTrade) {
-            // Pequeño delay para asegurar apertura de vela
-            setTimeout(() => {
-                executeTrade(activeMartingaleTrade.type);
-                // Registrar trade pendiente
-                const entryPrice = getCurrentPrice();
-                // Usar tiempo de la vela actual para el key, asegurando seguimiento
-                pendingTrades.push({ k: currentCandle.s, type: activeMartingaleTrade.type, entryPrice: entryPrice });
-                tradeExecutedThisCandle = true;
-                lastTradeType = activeMartingaleTrade.type;
-                activeMartingaleTrade = null; // Consumir la martingala
-            }, 500);
-        } else {
-             activeMartingaleTrade = null; // Si no es autotrade, cancelar mg
-        }
+      // Ejecutar martingala directamente - sin restricciones
+      logMonitor(`⚡ Ejecutando Martingala Nivel ${mgLevel}`, 'success');
+      if (config.autoTrade) {
+          // Pequeño delay para asegurar apertura de vela
+          const mgType = activeMartingaleTrade.type;
+          activeMartingaleTrade = null; // Consumir antes del timeout
+          setTimeout(() => {
+              executeTrade(mgType);
+              const entryPrice = getCurrentPrice();
+              pendingTrades.push({ k: currentCandle.s, type: mgType, entryPrice: entryPrice });
+              tradeExecutedThisCandle = true;
+              lastTradeType = mgType;
+          }, 500);
       } else {
-        // Martingala cancelada por condiciones desfavorables - Asumir pérdida
-        // Se resetea el nivel, se cuenta la pérdida y se informa
-        mgLevel = 0;
-        stats.l++;
-        sessionStats.l++; // Contar la pérdida original que estaba "en espera" de recuperación
-        logMonitor('⛔ Martingala cancelada - Riesgo alto detectado', 'blocked');
-        logMonitor('🛡️ Pérdida asumida para proteger capital', 'info');
-        activeMartingaleTrade = null;
+           activeMartingaleTrade = null;
       }
     }
   } else {
