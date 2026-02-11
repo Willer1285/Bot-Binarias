@@ -8,6 +8,7 @@ console.log('%c WORBIT SNIPER V15.0 LOADING...', 'background: #00e676; color: #0
 const VERSION = '15.0';
 const TARGET_CANDLES = 2;
 const TARGET_CANDLES_FULL = 3;
+const MIN_CANDLES_FOR_SR = 7;    // Mínimo de velas para detectar S/R (pivotes necesitan 2+2 a cada lado)
 const MAX_CANDLES = 200;
 const MAX_LOGS = 50; // Aumentado para ver más historial
 const HEALTH_CHECK_INTERVAL = 3000;
@@ -338,9 +339,11 @@ let lastWsData = null;
 let lastTradeTime = 0;             // Timestamp del último trade ejecutado
 let consecutiveLosses = 0;         // Contador de pérdidas consecutivas
 
-// ============= NUEVO V12: SISTEMA DE WARMUP =============
+// ============= SISTEMA DE WARMUP =============
 let systemWarmupLevel = 0;         // 0-100% de preparación
 let isSystemWarmedUp = false;      // True cuando está al 100%
+let firstCandleSkipped = false;    // La primera vela se descarta (incompleta)
+let srReady = false;               // True cuando hay al menos 1 soporte Y 1 resistencia
 
 // ============= NUEVO V12: PRICE ACTION & TREND =============
 let currentTrend = 'neutral';      // 'bullish', 'bearish', 'neutral'
@@ -802,7 +805,32 @@ function shouldExecuteMartingale(tradeType) {
     return false;
   }
 
-  // Gate 3: En niveles MG altos (≥2), requerir S/R cercano
+  // Gate 3: No doblar contra dirección de EMA
+  if (candles.length >= 21) {
+    const ind = getIndicators(candles);
+    if (ind.emaFast !== null && ind.emaSlow !== null) {
+      if (tradeType === 'call' && ind.emaFast < ind.emaSlow) {
+        logMonitor(`⏸ MG CALL pausada: EMA bajista`, 'blocked');
+        return false;
+      }
+      if (tradeType === 'put' && ind.emaFast > ind.emaSlow) {
+        logMonitor(`⏸ MG PUT pausada: EMA alcista`, 'blocked');
+        return false;
+      }
+    }
+
+    // Gate 4: No comprar sobrecomprado / no vender sobrevendido
+    if (tradeType === 'call' && ind.rsi > 70) {
+      logMonitor(`⏸ MG CALL pausada: RSI sobrecomprado (${ind.rsi.toFixed(0)})`, 'blocked');
+      return false;
+    }
+    if (tradeType === 'put' && ind.rsi < 30) {
+      logMonitor(`⏸ MG PUT pausada: RSI sobrevendido (${ind.rsi.toFixed(0)})`, 'blocked');
+      return false;
+    }
+  }
+
+  // Gate 5: En niveles MG altos (≥2), requerir S/R cercano
   if (mgLevel >= 2 && candles.length >= 5) {
     const idx = candles.length;
     const { supports, resistances } = getLevels(candles, idx);
@@ -938,19 +966,33 @@ function startBot() {
 // ============= FUNCIONES DE ESTADO (Movidias arriba para evitar ReferenceError) =============
 function checkWarmupStatus() {
   const currentCandles = candles.length;
-  // Usamos TARGET_CANDLES_FULL (3) como objetivo para estar listos
-  // ya que necesitamos prev2 (3 velas: actual, prev, prev2) para patrones
-  const target = TARGET_CANDLES_FULL; 
-  
+  // Necesitamos TARGET_CANDLES_FULL (3) velas COMPLETAS + S/R detectados
+  const target = TARGET_CANDLES_FULL;
+
   if (target <= 0) {
-      systemWarmupLevel = 100;
-      isSystemWarmedUp = true;
-      return true;
+    systemWarmupLevel = 100;
+    isSystemWarmedUp = true;
+    srReady = true;
+    return true;
   }
-  
-  systemWarmupLevel = Math.min(100, Math.floor((currentCandles / target) * 100));
-  isSystemWarmedUp = currentCandles >= target;
-  
+
+  // Progreso basado en velas (80%) + S/R (20%)
+  const candleProgress = Math.min(100, Math.floor((currentCandles / target) * 80));
+  const srProgress = srReady ? 20 : 0;
+  systemWarmupLevel = Math.min(100, candleProgress + srProgress);
+
+  // Sistema listo solo si tiene suficientes velas Y S/R detectados
+  isSystemWarmedUp = currentCandles >= target && srReady;
+
+  // Verificar S/R si hay suficientes velas
+  if (!srReady && currentCandles >= MIN_CANDLES_FOR_SR) {
+    const { supports, resistances } = getLevels(candles, currentCandles);
+    if (supports.length > 0 && resistances.length > 0) {
+      srReady = true;
+      logMonitor(`✓ S/R detectados: ${supports.length}S ${resistances.length}R - Sistema listo`, 'success');
+    }
+  }
+
   return isSystemWarmedUp;
 }
 
@@ -1742,6 +1784,59 @@ function applyConfigToUI() {
   }
 }
 
+// ============= INDICADORES TÉCNICOS (calculados desde datos de velas) =============
+
+// EMA (Media Móvil Exponencial) - se calcula instantáneamente desde closes
+function calcEMA(arr, period) {
+  if (arr.length < period) return null;
+  const k = 2 / (period + 1);
+  // SMA inicial
+  let ema = 0;
+  for (let i = 0; i < period; i++) ema += arr[i].c;
+  ema /= period;
+  // EMA desde el período en adelante
+  for (let i = period; i < arr.length; i++) {
+    ema = arr[i].c * k + ema * (1 - k);
+  }
+  return ema;
+}
+
+// RSI (Índice de Fuerza Relativa) - período estándar 14
+function calcRSI(arr, period = 14) {
+  if (arr.length < period + 1) return 50; // Neutral si no hay datos
+  const closes = arr.map(c => c.c);
+  let gains = 0, losses = 0;
+
+  // Primer cálculo con SMA
+  for (let i = 1; i <= period; i++) {
+    const diff = closes[i] - closes[i - 1];
+    if (diff > 0) gains += diff;
+    else losses -= diff;
+  }
+  let avgGain = gains / period;
+  let avgLoss = losses / period;
+
+  // Suavizado EMA para el resto
+  for (let i = period + 1; i < closes.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + (diff > 0 ? diff : 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + (diff < 0 ? -diff : 0)) / period;
+  }
+
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - (100 / (1 + rs));
+}
+
+// Obtener EMA rápida y lenta + RSI del estado actual
+function getIndicators(arr) {
+  return {
+    emaFast: calcEMA(arr, 8),    // EMA 8 (rápida)
+    emaSlow: calcEMA(arr, 21),   // EMA 21 (lenta)
+    rsi: calcRSI(arr, 14)        // RSI 14
+  };
+}
+
 // ============= FUNCIONES DE PRICE ACTION =============
 const getBody = c => Math.abs(c.c - c.o);
 const getUpperWick = c => c.h - Math.max(c.o, c.c);
@@ -1825,9 +1920,9 @@ function isNearLevel(price, levels, threshold) {
 
 const MIN_CONFLUENCE = 5; // Puntuación mínima para ejecutar señal
 
-// Calcula confluencia: patrón + S/R + tendencia
-function getSignalConfluence(pattern, nearSupport, nearResistance, trend) {
-  if (!pattern || pattern.score < 2) return 0; // Rechazar score < 2
+// Calcula confluencia: patrón + S/R + tendencia + indicadores
+function getSignalConfluence(pattern, nearSupport, nearResistance, trend, indicators) {
+  if (!pattern || pattern.score < 2) return 0;
 
   let confluence = pattern.score;
 
@@ -1836,15 +1931,29 @@ function getSignalConfluence(pattern, nearSupport, nearResistance, trend) {
                (pattern.type === 'put' && nearResistance);
   if (atSR) confluence += 3;
 
-  // +1 si es reversión al final de tendencia (el escenario ideal)
+  // +1 si es reversión al final de tendencia
   const trendReversal = (pattern.type === 'call' && trend === 'bearish') ||
                         (pattern.type === 'put' && trend === 'bullish');
   if (trendReversal) confluence += 1;
 
-  // -2 si va contra tendencia activa sin ser reversión en S/R
+  // -2 si va contra tendencia activa sin S/R
   const counterTrend = (pattern.type === 'call' && trend === 'bullish') ||
                        (pattern.type === 'put' && trend === 'bearish');
   if (counterTrend && !atSR) confluence -= 2;
+
+  // +1 si EMA confirma la dirección
+  if (indicators && indicators.emaFast !== null && indicators.emaSlow !== null) {
+    const emaConfirm = (pattern.type === 'call' && indicators.emaFast > indicators.emaSlow) ||
+                       (pattern.type === 'put' && indicators.emaFast < indicators.emaSlow);
+    if (emaConfirm) confluence += 1;
+  }
+
+  // +1 si RSI confirma (CALL en zona baja, PUT en zona alta)
+  if (indicators) {
+    const rsiConfirm = (pattern.type === 'call' && indicators.rsi < 45) ||
+                       (pattern.type === 'put' && indicators.rsi > 55);
+    if (rsiConfirm) confluence += 1;
+  }
 
   return confluence;
 }
@@ -2221,19 +2330,28 @@ function detectSignal(liveCandle) {
   }
   if (!isMinimumQuality(now, analysisCandles)) return null;
 
-  // === CALCULAR S/R Y MOMENTUM ===
+  // === CALCULAR S/R, MOMENTUM E INDICADORES ===
   const { supports, resistances } = getLevels(analysisCandles, i);
   const nearSupport = isNearLevel(now.l, supports);
   const nearResistance = isNearLevel(now.h, resistances);
   const momentumBullish = isStrongMomentum(analysisCandles, 'bullish');
   const momentumBearish = isStrongMomentum(analysisCandles, 'bearish');
 
-  // Log diagnóstico S/R (cada ~30 segundos para no saturar)
+  // Indicadores técnicos (calculados instantáneamente desde velas)
+  const ind = getIndicators(analysisCandles);
+  const hasEMA = ind.emaFast !== null && ind.emaSlow !== null;
+  const emaUptrend = hasEMA && ind.emaFast > ind.emaSlow;     // EMA8 > EMA21 = tendencia alcista
+  const emaDowntrend = hasEMA && ind.emaFast < ind.emaSlow;   // EMA8 < EMA21 = tendencia bajista
+  const rsiOverbought = ind.rsi > 70;   // Sobrecomprado
+  const rsiOversold = ind.rsi < 30;     // Sobrevendido
+
+  // Log diagnóstico (cada ~30 segundos)
   if (Math.random() < 0.03) {
     const sCount = supports.length;
     const rCount = resistances.length;
     const srInfo = nearSupport ? 'SOPORTE' : nearResistance ? 'RESISTENCIA' : 'ninguno';
-    logMonitor(`📊 S/R: ${sCount}S ${rCount}R | Cerca: ${srInfo} | Velas: ${analysisCandles.length}`, 'info');
+    const emaInfo = hasEMA ? (emaUptrend ? 'UP' : emaDowntrend ? 'DOWN' : 'FLAT') : 'N/A';
+    logMonitor(`📊 S:${sCount} R:${rCount} | ${srInfo} | EMA:${emaInfo} | RSI:${ind.rsi.toFixed(0)} | V:${analysisCandles.length}`, 'info');
   }
 
   let signal = null;
@@ -2243,7 +2361,7 @@ function detectSignal(liveCandle) {
   // --- 1. PATRONES DE 3 VELAS (mayor prioridad) ---
   const p3 = checkThreeCandlePattern(now, prev, prev2, currentTrend);
   if (p3 && p3.type !== 'neutral') {
-    const conf = getSignalConfluence(p3, nearSupport, nearResistance, currentTrend);
+    const conf = getSignalConfluence(p3, nearSupport, nearResistance, currentTrend, ind);
     if (conf >= MIN_CONFLUENCE) {
       signal = p3.type;
       strategy = p3.name;
@@ -2257,7 +2375,7 @@ function detectSignal(liveCandle) {
   if (!signal) {
     const p2 = checkTwoCandlePattern(now, prev, currentTrend);
     if (p2 && p2.type !== 'neutral') {
-      const conf = getSignalConfluence(p2, nearSupport, nearResistance, currentTrend);
+      const conf = getSignalConfluence(p2, nearSupport, nearResistance, currentTrend, ind);
       if (conf >= MIN_CONFLUENCE) {
         signal = p2.type;
         strategy = p2.name;
@@ -2272,7 +2390,7 @@ function detectSignal(liveCandle) {
   if (!signal) {
     const p1 = checkSingleCandlePattern(now, currentTrend);
     if (p1 && p1.type !== 'neutral') {
-      const conf = getSignalConfluence(p1, nearSupport, nearResistance, currentTrend);
+      const conf = getSignalConfluence(p1, nearSupport, nearResistance, currentTrend, ind);
       if (conf >= MIN_CONFLUENCE) {
         signal = p1.type;
         strategy = p1.name + ' (en Zona)';
@@ -2290,14 +2408,37 @@ function detectSignal(liveCandle) {
     }
   }
 
-  // === FILTRO DE MOMENTUM ===
+  // === FILTRO DE MOMENTUM + INDICADORES ===
   if (signal) {
+    // Filtro momentum por acción del precio
     if (signal === 'call' && momentumBearish) {
       logMonitor(`⚠ CALL anulada: Momentum Bajista fuerte`, 'info');
       signal = null;
     } else if (signal === 'put' && momentumBullish) {
       logMonitor(`⚠ PUT anulada: Momentum Alcista fuerte`, 'info');
       signal = null;
+    }
+
+    // Filtro EMA: No operar contra la tendencia de EMAs
+    if (signal && hasEMA) {
+      if (signal === 'call' && emaDowntrend && !nearSupport) {
+        logMonitor(`⚠ CALL anulada: EMA bajista (sin soporte)`, 'info');
+        signal = null;
+      } else if (signal === 'put' && emaUptrend && !nearResistance) {
+        logMonitor(`⚠ PUT anulada: EMA alcista (sin resistencia)`, 'info');
+        signal = null;
+      }
+    }
+
+    // Filtro RSI: No comprar sobrecomprado, no vender sobrevendido
+    if (signal) {
+      if (signal === 'call' && rsiOverbought) {
+        logMonitor(`⚠ CALL anulada: RSI sobrecomprado (${ind.rsi.toFixed(0)})`, 'info');
+        signal = null;
+      } else if (signal === 'put' && rsiOversold) {
+        logMonitor(`⚠ PUT anulada: RSI sobrevendido (${ind.rsi.toFixed(0)})`, 'info');
+        signal = null;
+      }
     }
   }
 
@@ -2374,7 +2515,11 @@ function onTick(data) {
     currentCandle = null;
     pendingTrades = [];
     processed = 0;
-    logMonitor(`Activo: ${currentPair}`, 'info');
+    firstCandleSkipped = false;
+    srReady = false;
+    isSystemWarmedUp = false;
+    systemWarmupLevel = 0;
+    logMonitor(`Activo: ${currentPair} - reiniciando warmup`, 'info');
     
     // Cargar histórico para el nuevo activo (Ahora vacío por eliminación de API)
     loadHistoricalData(currentPair).then(hist => {
@@ -2393,8 +2538,23 @@ function onTick(data) {
       s: candleTime, o: data.closePrice, h: data.closePrice,
       l: data.closePrice, c: data.closePrice, v: data.volume
     };
+    // Primera vela al iniciar: marcar como incompleta
+    if (!firstCandleSkipped) {
+      logMonitor('⏳ Primera vela en curso (incompleta) - descartando...', 'info');
+    }
   } else if (timestamp >= currentCandle.s + 60000) {
-    // Cerrar vela
+    // Cerrar vela - descartar si es la primera (incompleta)
+    if (!firstCandleSkipped) {
+      firstCandleSkipped = true;
+      logMonitor('✓ Primera vela descartada (incompleta)', 'info');
+      // No guardar esta vela, solo crear la nueva
+      currentCandle = {
+        s: candleTime, o: data.closePrice, h: data.closePrice,
+        l: data.closePrice, c: data.closePrice, v: data.volume
+      };
+      updateWarmupUI();
+      return;
+    }
     candles.push({ ...currentCandle });
     if (candles.length > MAX_CANDLES) candles.shift();
     
