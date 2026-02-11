@@ -1823,7 +1823,7 @@ function isNearLevel(price, levels, threshold) {
 
 // ============= FILTROS DE CALIDAD =============
 
-const MIN_CONFLUENCE = 6; // Puntuación mínima para ejecutar señal
+const MIN_CONFLUENCE = 5; // Puntuación mínima para ejecutar señal
 
 // Calcula confluencia: patrón + S/R + tendencia
 function getSignalConfluence(pattern, nearSupport, nearResistance, trend) {
