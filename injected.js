@@ -1238,11 +1238,11 @@ let originalWebSocket = null;
 let wsReconnectTimeout = null;
 let lastWsUrl = null;
 let lastWsProtocols = null;
-let sioConfig = { pingInterval: 25000, pingTimeout: 5000 }; // Defaults Socket.IO
-let sioPingTimer = null;          // Timer para enviar pings propios
-let sioNamespaceConnected = false; // Si ya nos conectamos al namespace /symbol-prices
-let lastSubscribedChannel = null;  // Último canal suscrito para re-suscripción
-let activeBrokerSocket = null;     // WebSocket del broker-api (para mantenerlo vivo también)
+let sioConfig = { pingInterval: 25000, pingTimeout: 60000 }; // Defaults Worbit (symbol-prices: 60s, broker-api: 20s)
+let sioPingTimer = null;          // Timer (no usado - la página maneja pings)
+let sioNamespaceConnected = false; // Si el namespace /symbol-prices está conectado
+let lastSubscribedChannel = null;  // Último canal detectado para tracking
+let activeBrokerSocket = null;     // WebSocket del broker-api
 
 function setupWebSocketInterceptor() {
   if (originalWebSocket) return;
@@ -1324,53 +1324,37 @@ function setupWebSocketInterceptor() {
   setInterval(checkWsHealth, 5000);
 }
 
-// ============= PROTOCOLO SOCKET.IO V4 =============
-// Códigos: 0=open, 1=close, 2=ping, 3=pong, 4=message
-// 40=CONNECT namespace, 42=EVENT
+// ============= PROTOCOLO SOCKET.IO V4 (INTERCEPTOR PASIVO) =============
+// REGLA CRÍTICA: Solo OBSERVAR mensajes, NUNCA enviar protocolo.
+// La página tiene su propio cliente Socket.IO que maneja handshake, ping/pong,
+// namespace connects y suscripciones. Enviar duplicados causa código 1005.
 
 function handlePriceSocketMessage(ws, data) {
   if (typeof data !== 'string') return;
 
-  // --- HANDSHAKE INICIAL: Servidor envía configuración ---
-  // Mensaje tipo: 0{"sid":"xxx","upgrades":[],"pingInterval":25000,"pingTimeout":5000}
+  // --- HANDSHAKE: Solo leer configuración (la página envía 40/symbol-prices,) ---
   if (data.startsWith('0{')) {
     try {
       const config = JSON.parse(data.substring(1));
       if (config.pingInterval) sioConfig.pingInterval = config.pingInterval;
       if (config.pingTimeout) sioConfig.pingTimeout = config.pingTimeout;
-      logMonitor(`✓ Handshake OK (ping: ${sioConfig.pingInterval/1000}s)`, 'info');
-
-      // Conectar al namespace /symbol-prices
-      wsSafeSend(ws, '40/symbol-prices,');
+      logMonitor(`✓ Handshake detectado (ping: ${sioConfig.pingInterval/1000}s, timeout: ${sioConfig.pingTimeout/1000}s)`, 'info');
     } catch(e) {}
     return;
   }
 
-  // --- RESPUESTA DE CONEXIÓN A NAMESPACE ---
-  // Mensaje tipo: 40/symbol-prices,{"sid":"xxx"}
+  // --- NAMESPACE CONECTADO: Solo actualizar estado interno ---
   if (data.startsWith('40/symbol-prices')) {
     sioNamespaceConnected = true;
     wsConnected = true;
+    wsReconnectAttempt = 0;
     updateConnectionUI(true);
-    startSioPing(ws);
     logMonitor('✓ Namespace /symbol-prices conectado', 'success');
-
-    // Suscribirse al canal de precios del activo actual
-    subscribeToCurrentSymbol(ws);
     return;
   }
 
-  // --- PING DEL SERVIDOR: Responder con PONG ---
-  // Socket.IO v4: servidor envía "2", cliente responde "3"
-  if (data === '2') {
-    wsSafeSend(ws, '3');
-    return;
-  }
-
-  // --- PONG DEL SERVIDOR (respuesta a nuestro ping) ---
-  if (data === '3') {
-    return; // OK, conexión viva
-  }
+  // --- PING/PONG: Ignorar - la página responde automáticamente ---
+  if (data === '2' || data === '3') return;
 
   // --- MENSAJES DE DATOS (42/symbol-prices,...) ---
   processWebSocketMessage(data);
@@ -1379,22 +1363,22 @@ function handlePriceSocketMessage(ws, data) {
 function handleBrokerSocketMessage(ws, data) {
   if (typeof data !== 'string') return;
 
-  // Handshake del broker-api
+  // Handshake: solo detectar (la página envía 40/user, automáticamente)
   if (data.startsWith('0{')) {
-    try {
-      // Conectar a namespaces del broker
-      wsSafeSend(ws, '40/user,');
-    } catch(e) {}
+    logMonitor('✓ Broker API handshake detectado', 'info');
     return;
   }
 
-  // Responder ping del broker-api también
-  if (data === '2') {
-    wsSafeSend(ws, '3');
+  // Namespace /user conectado: solo detectar
+  if (data.startsWith('40/user')) {
+    logMonitor('✓ Namespace /user conectado', 'info');
     return;
   }
 
-  // Procesar mensajes de balance/wallet
+  // Ping/Pong: ignorar - la página responde automáticamente
+  if (data === '2' || data === '3') return;
+
+  // Procesar mensajes de balance/wallet/trades
   processWebSocketMessage(data);
 }
 
@@ -1408,24 +1392,11 @@ function wsSafeSend(ws, msg) {
   return false;
 }
 
-// --- SISTEMA DE PING PROPIO ---
+// --- PING: Manejado por la página, no por el bot ---
+// startSioPing y stopSioPing ya no envían mensajes.
+// La página tiene su propio cliente Socket.IO que maneja el keep-alive.
 function startSioPing(ws) {
-  stopSioPing();
-  // Enviar ping cada pingInterval (normalmente 25s)
-  // Usamos 80% del intervalo para tener margen
-  const interval = Math.floor(sioConfig.pingInterval * 0.8);
-  sioPingTimer = setInterval(() => {
-    if (!wsSafeSend(ws, '2')) {
-      stopSioPing();
-      // Si no se pudo enviar, el socket probablemente está muerto
-      if (wsConnected) {
-        wsConnected = false;
-        sioNamespaceConnected = false;
-        updateConnectionUI(false);
-        scheduleReconnect();
-      }
-    }
-  }, interval);
+  // No-op: la página maneja pings automáticamente
 }
 
 function stopSioPing() {
@@ -1436,19 +1407,18 @@ function stopSioPing() {
 }
 
 // --- SUSCRIPCIÓN A CANAL DE PRECIOS ---
+// La página suscribe automáticamente al activo seleccionado.
+// Solo leemos el canal actual para tracking interno.
 function subscribeToCurrentSymbol(ws) {
   try {
-    // Obtener el símbolo actual del store de Worbit
     let channel = null;
     const symbolStore = localStorage.getItem('symbol-store');
     if (symbolStore) {
       const parsed = JSON.parse(symbolStore);
       const symbol = parsed?.state?.symbolSelected;
       if (symbol) {
-        // Construir canal: slot:ticker (ej: "mybroker-11:ETHUSDT.OTC")
-        // Buscar el slot del tenant
         const tenantStore = localStorage.getItem('tenant-store');
-        let slot = 'mybroker-11'; // Default
+        let slot = 'mybroker-11';
         if (tenantStore) {
           try {
             const tp = JSON.parse(tenantStore);
@@ -1458,26 +1428,14 @@ function subscribeToCurrentSymbol(ws) {
         channel = `${slot}:${symbol}`;
       }
     }
-
-    // Fallback: usar el par actual si lo tenemos
     if (!channel && currentPair) {
       channel = `mybroker-11:${currentPair}`;
     }
-
-    // Fallback: usar último canal conocido
-    if (!channel && lastSubscribedChannel) {
-      channel = lastSubscribedChannel;
-    }
-
     if (channel) {
-      const msg = `42/symbol-prices,["last-symbol-price","${channel}"]`;
-      wsSafeSend(ws, msg);
       lastSubscribedChannel = channel;
-      logMonitor(`✓ Suscrito a ${channel}`, 'success');
+      logMonitor(`✓ Canal detectado: ${channel}`, 'success');
     }
-  } catch(e) {
-    logMonitor('⚠ Error al suscribirse al canal', 'blocked');
-  }
+  } catch(e) {}
 }
 
 /**
@@ -1486,28 +1444,27 @@ function subscribeToCurrentSymbol(ws) {
 function checkWsHealth() {
   if (!isRunning) return;
 
-  // Verificar si el WebSocket de precios sigue abierto
+  // Solo monitorear estado - la página maneja la conexión
   if (activeWebSocket && activeWebSocket.readyState === WebSocket.OPEN) {
-    // Socket abierto - verificar si el namespace está conectado
-    if (!sioNamespaceConnected) {
-      wsSafeSend(activeWebSocket, '40/symbol-prices,');
-    }
+    // Socket abierto, todo bien
     return;
   }
 
-  // Socket cerrado o no existe
+  // Socket cerrado o no existe - actualizar estado
   if (wsConnected) {
-    logMonitor('⚠ Conexión perdida - reconectando...', 'pattern');
+    logMonitor('⚠ Conexión perdida - esperando reconexión automática...', 'pattern');
     wsConnected = false;
     sioNamespaceConnected = false;
     updateConnectionUI(false);
   }
 
+  // Esperar reconexión automática de Socket.IO de la página
+  // Solo intervenir si no reconecta después de múltiples checks
   if (!wsReconnectTimeout) {
     scheduleReconnect();
   }
 
-  // También verificar el broker-api socket
+  // Monitorear broker-api socket
   if (activeBrokerSocket && activeBrokerSocket.readyState !== WebSocket.OPEN) {
     activeBrokerSocket = null;
   }
@@ -1576,13 +1533,14 @@ function processWebSocketMessage(data) {
 }
 
 /**
- * V12: Sistema de reconexión instantánea con backoff exponencial
- * No recarga la página, crea una nueva conexión WebSocket directamente
+ * Sistema de reconexión pasivo.
+ * NO crea WebSockets nuevos (eso causa duplicados y código 1005).
+ * Espera que Socket.IO de la página reconecte automáticamente.
+ * Solo interviene con acciones de UI si la página no reconecta.
  */
 function scheduleReconnect() {
   if (wsReconnectTimeout) return;
 
-  // Determinar delay basado en el intento actual (máx 5s)
   const delayIndex = Math.min(wsReconnectAttempt, WS_RECONNECT_DELAYS.length - 1);
   const delay = WS_RECONNECT_DELAYS[delayIndex];
 
@@ -1594,59 +1552,36 @@ function scheduleReconnect() {
     }
 
     wsReconnectAttempt++;
-    logMonitor(`🔄 Reconectando (intento ${wsReconnectAttempt})...`, 'info');
 
-    // Estrategia escalonada:
-    // 1-5: Reconexión directa con URL guardada
-    // 6-10: Buscar WebSocket activo en la página y clonar su URL
-    // 11+: Forzar que la página recree el WebSocket navegando al activo
-    if (wsReconnectAttempt <= 5) {
-      attemptDirectReconnect();
+    // Estrategia escalonada PASIVA:
+    // 1-6: Esperar reconexión automática de Socket.IO (~30s)
+    // 7-10: Simular click en activo para forzar re-suscripción
+    // 11+: Forzar recreación navegando activos
+    if (wsReconnectAttempt <= 6) {
+      logMonitor(`⏳ Esperando reconexión automática (${wsReconnectAttempt}/6)...`, 'info');
+      scheduleReconnect();
     } else if (wsReconnectAttempt <= 10) {
-      attemptDiscoverReconnect();
+      attemptRefreshSubscription();
     } else {
       attemptForcePageReconnect();
-      wsReconnectAttempt = 0; // Reiniciar ciclo
+      wsReconnectAttempt = 0;
     }
   }, delay);
 }
 
 /**
- * V12: Intenta reconectar directamente creando un nuevo WebSocket
+ * Estrategia 2: Simular click en activo actual para refrescar suscripción WS
+ * No crea WebSockets nuevos, solo interactúa con la UI
  */
-function attemptDirectReconnect() {
-  if (lastWsUrl) {
-    try {
-      const urlObj = new URL(lastWsUrl);
-      urlObj.searchParams.set('_t', Date.now());
-      new window.WebSocket(urlObj.toString(), lastWsProtocols);
-      return;
-    } catch (e) {}
-  }
-  // Si no hay URL, pasar a siguiente estrategia
-  scheduleReconnect();
-}
-
-/**
- * Estrategia 2: Buscar WebSockets activos en la página y clonar su configuración
- */
-function attemptDiscoverReconnect() {
+function attemptRefreshSubscription() {
+  logMonitor('🔄 Refrescando suscripción...', 'info');
   try {
-    // Buscar en el store de Worbit la URL del WS actual
-    const symbolStore = localStorage.getItem('symbol-store');
-    if (symbolStore) {
-      const parsed = JSON.parse(symbolStore);
-      const symbol = parsed?.state?.symbolSelected;
-      if (symbol) {
-        logMonitor(`🔍 Redescubriendo WS para ${symbol}...`, 'info');
-        // Forzar cambio de símbolo para que la página recree el WS
-        // Hacer click en el activo actual para refrescar la suscripción
-        const activeItem = document.querySelector('[class*="symbol-item"][class*="active"], [class*="pair-item"][class*="selected"]');
-        if (activeItem) {
-          activeItem.click();
-          return;
-        }
-      }
+    const activeItem = document.querySelector('[class*="symbol-item"][class*="active"], [class*="pair-item"][class*="selected"]');
+    if (activeItem) {
+      activeItem.click();
+      logMonitor('✓ Click en activo para refrescar', 'success');
+      scheduleReconnect();
+      return;
     }
   } catch(e) {}
   scheduleReconnect();
@@ -1654,24 +1589,14 @@ function attemptDiscoverReconnect() {
 
 /**
  * Estrategia 3: Forzar que la página recree sus conexiones WebSocket
+ * Como último recurso, navega entre activos para forzar nueva conexión
  */
 function attemptForcePageReconnect() {
   logMonitor('🔄 Forzando reconexión de página...', 'pattern');
   try {
-    // Método 1: Recargar iframe del gráfico
-    const chartFrames = document.querySelectorAll('iframe');
-    for (const frame of chartFrames) {
-      if (frame.src && (frame.src.includes('chart') || frame.src.includes('tradingview'))) {
-        frame.src = frame.src;
-        logMonitor('✓ Gráfico recargado', 'success');
-        return;
-      }
-    }
-
-    // Método 2: Simular cambio de activo para forzar nueva suscripción WS
+    // Método 1: Simular cambio de activo ida y vuelta
     const pairItems = document.querySelectorAll('[class*="symbol-item"], [class*="pair-item"], [class*="asset-item"]');
     if (pairItems.length > 1) {
-      // Click en otro activo y luego volver al original
       const otherItem = pairItems[1];
       otherItem.click();
       setTimeout(() => {
@@ -1681,7 +1606,15 @@ function attemptForcePageReconnect() {
       return;
     }
 
-    logMonitor('⚠ Reconexión forzada sin resultado - reintentando...', 'info');
+    // Método 2: Recargar iframe del gráfico
+    const chartFrames = document.querySelectorAll('iframe');
+    for (const frame of chartFrames) {
+      if (frame.src && (frame.src.includes('chart') || frame.src.includes('tradingview'))) {
+        frame.src = frame.src;
+        logMonitor('✓ Gráfico recargado', 'success');
+        return;
+      }
+    }
   } catch(e) {}
   scheduleReconnect();
 }
