@@ -1815,8 +1815,8 @@ function isNearLevel(price, levels, threshold) {
   if (!threshold) {
     const avgRange = candles.length >= 10
       ? candles.slice(-10).reduce((a, c) => a + (c.h - c.l), 0) / 10
-      : price * 0.0005;
-    threshold = avgRange * 0.5; // Dentro del 50% del rango promedio
+      : price * 0.001;
+    threshold = avgRange * 1.5; // Dentro de 1.5x el rango promedio de vela
   }
   return levels.some(lvl => Math.abs(price - lvl) < threshold);
 }
@@ -2227,6 +2227,14 @@ function detectSignal(liveCandle) {
   const nearResistance = isNearLevel(now.h, resistances);
   const momentumBullish = isStrongMomentum(analysisCandles, 'bullish');
   const momentumBearish = isStrongMomentum(analysisCandles, 'bearish');
+
+  // Log diagnóstico S/R (cada ~30 segundos para no saturar)
+  if (Math.random() < 0.03) {
+    const sCount = supports.length;
+    const rCount = resistances.length;
+    const srInfo = nearSupport ? 'SOPORTE' : nearResistance ? 'RESISTENCIA' : 'ninguno';
+    logMonitor(`📊 S/R: ${sCount}S ${rCount}R | Cerca: ${srInfo} | Velas: ${analysisCandles.length}`, 'info');
+  }
 
   let signal = null;
   let strategy = '';
