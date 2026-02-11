@@ -572,13 +572,21 @@ function updateTrend() {
     if (recent[i].c > recent[i].o) greens++;
     else if (recent[i].c < recent[i].o) reds++;
   }
-  // Verificar cierre progresivo
   const closesRising = recent[recent.length-1].c > recent[0].c;
   const closesFalling = recent[recent.length-1].c < recent[0].c;
 
-  if (greens >= Math.ceil(MIN_TREND_CANDLES * 0.6) && closesRising) {
+  // Conteo de higher-highs / lower-lows para confirmar estructura
+  let hhCount = 0, llCount = 0;
+  for (let i = 1; i < recent.length; i++) {
+    if (recent[i].h > recent[i-1].h) hhCount++;
+    if (recent[i].l < recent[i-1].l) llCount++;
+  }
+
+  const threshold = Math.ceil(MIN_TREND_CANDLES * 0.6);
+
+  if (greens >= threshold && closesRising && hhCount >= 2) {
     currentTrend = 'bullish';
-  } else if (reds >= Math.ceil(MIN_TREND_CANDLES * 0.6) && closesFalling) {
+  } else if (reds >= threshold && closesFalling && llCount >= 2) {
     currentTrend = 'bearish';
   } else {
     currentTrend = 'neutral';
@@ -778,8 +786,35 @@ function checkSafeStop() {
 }
 
 function shouldExecuteMartingale(tradeType) {
-  // Martingala siempre se ejecuta si está activa - sin restricciones
-  // El ciclo debe completarse según la configuración del usuario
+  // Gate 1: No doblar en mercado choppy
+  if (candles.length >= 8 && isChoppyMarket(candles)) {
+    logMonitor('⏸ MG pausada: Mercado lateral', 'info');
+    return false;
+  }
+
+  // Gate 2: No doblar contra momentum fuerte
+  if (tradeType === 'call' && isStrongMomentum(candles, 'bearish')) {
+    logMonitor('⏸ MG CALL pausada: Momentum bajista fuerte', 'blocked');
+    return false;
+  }
+  if (tradeType === 'put' && isStrongMomentum(candles, 'bullish')) {
+    logMonitor('⏸ MG PUT pausada: Momentum alcista fuerte', 'blocked');
+    return false;
+  }
+
+  // Gate 3: En niveles MG altos (≥2), requerir S/R cercano
+  if (mgLevel >= 2 && candles.length >= 5) {
+    const idx = candles.length;
+    const { supports, resistances } = getLevels(candles, idx);
+    const price = getCurrentPrice();
+    const nearSR = (tradeType === 'call' && isNearLevel(price, supports)) ||
+                   (tradeType === 'put' && isNearLevel(price, resistances));
+    if (!nearSR) {
+      logMonitor(`⏸ MG Nivel ${mgLevel} pausada: Sin S/R cercano`, 'blocked');
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -1720,9 +1755,10 @@ const getAvgBody = (arr, count = 10) => {
 
 function getLevels(arr, index) {
   const supports = [], resistances = [];
-  const lookback = Math.min(index, 50);
+  const lookback = Math.min(index, 100); // Expandido de 50 a 100 velas
   const start = Math.max(0, index - lookback);
-  
+
+  // Pivotes mayores (2 velas a cada lado)
   for (let i = start + 2; i < index - 2; i++) {
     const c = arr[i];
     if (c.h > arr[i-1].h && c.h > arr[i-2].h && c.h > arr[i+1].h && c.h > arr[i+2].h) {
@@ -1732,11 +1768,120 @@ function getLevels(arr, index) {
       supports.push(c.l);
     }
   }
-  return { supports, resistances };
+
+  // Pivotes menores (1 vela a cada lado) - más niveles disponibles
+  for (let i = start + 1; i < index - 1; i++) {
+    const c = arr[i];
+    if (c.h > arr[i-1].h && c.h > arr[i+1].h) {
+      if (!resistances.some(r => Math.abs(r - c.h) < c.h * 0.0003)) {
+        resistances.push(c.h);
+      }
+    }
+    if (c.l < arr[i-1].l && c.l < arr[i+1].l) {
+      if (!supports.some(s => Math.abs(s - c.l) < c.l * 0.0003)) {
+        supports.push(c.l);
+      }
+    }
+  }
+
+  // Clusterizar niveles cercanos en zonas más fuertes
+  return {
+    supports: clusterLevels(supports, 0.0004),
+    resistances: clusterLevels(resistances, 0.0004)
+  };
 }
 
-function isNearLevel(price, levels, threshold = 0.0002) {
-  return levels.some(lvl => Math.abs(price - lvl) < (price * threshold));
+// Agrupa niveles cercanos en un precio promedio con conteo de toques
+function clusterLevels(levels, thresholdPct) {
+  if (levels.length === 0) return [];
+  const sorted = [...levels].sort((a, b) => a - b);
+  const clusters = [];
+  let cluster = [sorted[0]];
+
+  for (let i = 1; i < sorted.length; i++) {
+    if (Math.abs(sorted[i] - cluster[cluster.length - 1]) < sorted[i] * thresholdPct) {
+      cluster.push(sorted[i]);
+    } else {
+      clusters.push(cluster.reduce((a, b) => a + b) / cluster.length);
+      cluster = [sorted[i]];
+    }
+  }
+  clusters.push(cluster.reduce((a, b) => a + b) / cluster.length);
+  return clusters;
+}
+
+// Threshold dinámico basado en volatilidad reciente
+function isNearLevel(price, levels, threshold) {
+  if (!threshold) {
+    const avgRange = candles.length >= 10
+      ? candles.slice(-10).reduce((a, c) => a + (c.h - c.l), 0) / 10
+      : price * 0.0005;
+    threshold = avgRange * 0.5; // Dentro del 50% del rango promedio
+  }
+  return levels.some(lvl => Math.abs(price - lvl) < threshold);
+}
+
+// ============= FILTROS DE CALIDAD =============
+
+const MIN_CONFLUENCE = 6; // Puntuación mínima para ejecutar señal
+
+// Calcula confluencia: patrón + S/R + tendencia
+function getSignalConfluence(pattern, nearSupport, nearResistance, trend) {
+  if (!pattern || pattern.score < 2) return 0; // Rechazar score < 2
+
+  let confluence = pattern.score;
+
+  // +3 si está en zona S/R apropiada
+  const atSR = (pattern.type === 'call' && nearSupport) ||
+               (pattern.type === 'put' && nearResistance);
+  if (atSR) confluence += 3;
+
+  // +1 si es reversión al final de tendencia (el escenario ideal)
+  const trendReversal = (pattern.type === 'call' && trend === 'bearish') ||
+                        (pattern.type === 'put' && trend === 'bullish');
+  if (trendReversal) confluence += 1;
+
+  // -2 si va contra tendencia activa sin ser reversión en S/R
+  const counterTrend = (pattern.type === 'call' && trend === 'bullish') ||
+                       (pattern.type === 'put' && trend === 'bearish');
+  if (counterTrend && !atSR) confluence -= 2;
+
+  return confluence;
+}
+
+// Verifica si el mercado está choppy/lateral (no operar)
+function isChoppyMarket(arr) {
+  if (arr.length < 8) return false;
+  const recent = arr.slice(-8);
+  let dirChanges = 0;
+
+  for (let i = 1; i < recent.length; i++) {
+    const prevG = isGreen(recent[i-1]);
+    const currG = isGreen(recent[i]);
+    if (prevG !== currG) dirChanges++;
+  }
+
+  // 6+ cambios de dirección en 8 velas = choppy
+  if (dirChanges >= 6) return true;
+
+  // Volatilidad contrayéndose = consolidación
+  const ranges = recent.map(c => c.h - c.l);
+  const avgRange = ranges.reduce((a, b) => a + b) / ranges.length;
+  const latestRange = ranges[ranges.length - 1];
+  if (avgRange > 0 && latestRange < avgRange * 0.3) return true;
+
+  return false;
+}
+
+// Verifica calidad mínima de la vela (no operar en ruido)
+function isMinimumQuality(candle, allCandles) {
+  const totalRange = candle.h - candle.l;
+  if (totalRange === 0 || totalRange < candle.c * 0.00005) return false;
+
+  const avgBody = getAvgBody(allCandles, 10);
+  if (avgBody > 0 && getBody(candle) < avgBody * 0.2) return false;
+
+  return true;
 }
 
 function isPinBar(c, type) {
@@ -1765,16 +1910,30 @@ function isExhaustion(c, type) {
 
 function isStrongMomentum(arr, type) {
   if (arr.length < 5) return false;
-  const last = arr[arr.length - 1];
-  const prev = arr[arr.length - 2];
-  const prev2 = arr[arr.length - 3];
-  const avgBody = getAvgBody(arr);
+  const recent = arr.slice(-5);
+  const avgBody = getAvgBody(arr, 10);
 
   if (type === 'bearish') {
-    return isRed(last) && isRed(prev) && isRed(prev2) && getBody(last) > avgBody;
+    let consecutiveRed = 0, strengthScore = 0;
+    for (let i = recent.length - 1; i >= 0; i--) {
+      if (isRed(recent[i])) {
+        consecutiveRed++;
+        if (getBody(recent[i]) > avgBody) strengthScore++;
+        if (getLowerWick(recent[i]) < getBody(recent[i]) * 0.3) strengthScore++; // Cierra cerca del mínimo
+      } else break;
+    }
+    return consecutiveRed >= 3 && strengthScore >= 3;
   }
   if (type === 'bullish') {
-    return isGreen(last) && isGreen(prev) && isGreen(prev2) && getBody(last) > avgBody;
+    let consecutiveGreen = 0, strengthScore = 0;
+    for (let i = recent.length - 1; i >= 0; i--) {
+      if (isGreen(recent[i])) {
+        consecutiveGreen++;
+        if (getBody(recent[i]) > avgBody) strengthScore++;
+        if (getUpperWick(recent[i]) < getBody(recent[i]) * 0.3) strengthScore++; // Cierra cerca del máximo
+      } else break;
+    }
+    return consecutiveGreen >= 3 && strengthScore >= 3;
   }
   return false;
 }
@@ -1877,18 +2036,24 @@ function checkTwoCandlePattern(curr, prev, trend) {
      return { name: 'Harami Bajista', type: 'put', score: 3 };
   }
   
-  // Piercing Line (Pauta Penetrante)
-  if (trend === 'bearish' && isRed(prev) && isGreen(curr) && 
-      curr.o < prev.l && curr.c > getBodyMiddle(prev) && curr.c < prev.o) {
+  // Piercing Line (Pauta Penetrante) - Adaptado para OTC (sin gaps)
+  if (trend === 'bearish' && isRed(prev) && isGreen(curr) &&
+      curr.o <= prev.c &&                          // OTC: abre en/bajo cierre anterior
+      curr.c > getBodyMiddle(prev) &&              // Cierra por encima del punto medio
+      curr.c < prev.o &&                           // Pero no supera apertura anterior
+      getBody(curr) > getBody(prev) * 0.5) {       // Cuerpo sustancial
     return { name: 'Pauta Penetrante', type: 'call', score: 4 };
   }
-  
-  // Dark Cloud Cover (Cubierta Nube Oscura)
-  if (trend === 'bullish' && isGreen(prev) && isRed(curr) && 
-      curr.o > prev.h && curr.c < getBodyMiddle(prev) && curr.c > prev.o) {
+
+  // Dark Cloud Cover (Cubierta Nube Oscura) - Adaptado para OTC
+  if (trend === 'bullish' && isGreen(prev) && isRed(curr) &&
+      curr.o >= prev.c &&                          // OTC: abre en/sobre cierre anterior
+      curr.c < getBodyMiddle(prev) &&              // Cierra por debajo del punto medio
+      curr.c > prev.o &&                           // Pero no cae bajo apertura anterior
+      getBody(curr) > getBody(prev) * 0.5) {       // Cuerpo sustancial
     return { name: 'Cubierta Nube Oscura', type: 'put', score: 4 };
   }
-  
+
   // Tweezers (Pinzas)
   const tolerance = (curr.h - curr.l) * 0.05;
   if (Math.abs(curr.l - prev.l) < tolerance && trend === 'bearish') {
@@ -1898,16 +2063,22 @@ function checkTwoCandlePattern(curr, prev, trend) {
     return { name: 'Techo en Pinzas', type: 'put', score: 4 };
   }
 
-  // Coz (Kicking)
+  // Coz (Kicking) - Adaptado para OTC (sin gaps, dos Marubozus opuestos)
   if (isMarubozu(prev) && isMarubozu(curr)) {
-      if (isRed(prev) && isGreen(curr) && hasGapUp(curr, prev)) return { name: 'Coz Alcista', type: 'call', score: 5};
-      if (isGreen(prev) && isRed(curr) && hasGapDown(curr, prev)) return { name: 'Coz Bajista', type: 'put', score: 5};
+    if (isRed(prev) && isGreen(curr) && getBody(curr) > getBody(prev) * 0.8) {
+      return { name: 'Coz Alcista', type: 'call', score: 4 };
+    }
+    if (isGreen(prev) && isRed(curr) && getBody(curr) > getBody(prev) * 0.8) {
+      return { name: 'Coz Bajista', type: 'put', score: 4 };
+    }
   }
 
-  // On Neck Line (Bajista)
-  if (trend === 'bearish' && isRed(prev) && isGreen(curr) && 
-      hasGapDown(curr, prev) && Math.abs(curr.c - prev.l) < tolerance) {
-      return { name: 'On Neck Line', type: 'put', score: 3 }; // Continuación bajista
+  // On Neck Line (Bajista) - Adaptado para OTC
+  if (trend === 'bearish' && isRed(prev) && isGreen(curr) &&
+      curr.o <= prev.c &&                                   // Abre en cierre anterior
+      Math.abs(curr.c - prev.l) < tolerance &&              // Cierra cerca del mínimo anterior
+      getBody(curr) < getBody(prev) * 0.5) {                // Cuerpo pequeño = rebote débil
+    return { name: 'On Neck Line', type: 'put', score: 3 };
   }
 
   // Separadas (Separating Lines) - Continuación
@@ -1939,24 +2110,27 @@ function checkThreeCandlePattern(curr, prev, prev2, trend) {
       return { name: 'Estrella Vespertina', type: 'put', score: 5 };
   }
   
-  // Three White Soldiers
-  if (trend === 'bearish' && 
+  // Three White Soldiers - Relajado para OTC (sin exigir apertura dentro del cuerpo anterior)
+  const avgBodyRef = getAvgBody(candles.length > 0 ? candles : [prev2, prev, curr], 10);
+  if (trend === 'bearish' &&
       isGreen(prev2) && isGreen(prev) && isGreen(curr) &&
-      prev.c > prev2.c && curr.c > prev.c &&
-      prev.o > prev2.o && prev.o < prev2.c &&
-      curr.o > prev.o && curr.o < prev.c &&
-      !isDoji(prev2) && !isDoji(prev) && !isDoji(curr)) {
-      return { name: 'Tres Soldados Blancos', type: 'call', score: 5 };
+      prev.c > prev2.c && curr.c > prev.c &&               // Cierres progresivos
+      !isDoji(prev2) && !isDoji(prev) && !isDoji(curr) &&
+      getBody(prev2) > avgBodyRef * 0.5 &&                  // Cuerpos sustanciales
+      getBody(prev) > avgBodyRef * 0.5 &&
+      getBody(curr) > avgBodyRef * 0.5) {
+    return { name: 'Tres Soldados Blancos', type: 'call', score: 5 };
   }
-  
-  // Three Black Crows
-  if (trend === 'bullish' && 
+
+  // Three Black Crows - Relajado para OTC
+  if (trend === 'bullish' &&
       isRed(prev2) && isRed(prev) && isRed(curr) &&
-      prev.c < prev2.c && curr.c < prev.c &&
-      prev.o < prev2.o && prev.o > prev2.c &&
-      curr.o < prev.o && curr.o > prev.c &&
-      !isDoji(prev2) && !isDoji(prev) && !isDoji(curr)) {
-      return { name: 'Tres Cuervos Negros', type: 'put', score: 5 };
+      prev.c < prev2.c && curr.c < prev.c &&               // Cierres progresivos
+      !isDoji(prev2) && !isDoji(prev) && !isDoji(curr) &&
+      getBody(prev2) > avgBodyRef * 0.5 &&
+      getBody(prev) > avgBodyRef * 0.5 &&
+      getBody(curr) > avgBodyRef * 0.5) {
+    return { name: 'Tres Cuervos Negros', type: 'put', score: 5 };
   }
   
   // Variantes Doji Star
@@ -1967,14 +2141,20 @@ function checkThreeCandlePattern(curr, prev, prev2, trend) {
       return { name: 'Estrella Doji Vespertina', type: 'put', score: 5 };
   }
 
-  // Bebé Abandonado (Gaps claros a ambos lados del Doji)
-  if (isRed(prev2) && isDoji(prev) && isGreen(curr) && 
-      prev.h < prev2.l && prev.h < curr.l) { 
-      return { name: 'Bebé Abandonado Alcista', type: 'call', score: 6 };
+  // Bebé Abandonado - Adaptado para OTC (sin gaps, doji ultra-estrecho entre velas fuertes)
+  if (isRed(prev2) && isDoji(prev) && isGreen(curr) &&
+      getBody(prev) < getBody(prev2) * 0.15 &&       // Doji muy pequeño vs primera vela
+      getBody(prev) < getBody(curr) * 0.15 &&         // Doji muy pequeño vs tercera vela
+      (prev.h - prev.l) < getBody(prev2) * 0.3 &&    // Rango del doji ultra-estrecho
+      curr.c > getBodyMiddle(prev2)) {                 // Confirmación: recupera el 50%
+    return { name: 'Bebé Abandonado Alcista', type: 'call', score: 5 };
   }
-  if (isGreen(prev2) && isDoji(prev) && isRed(curr) && 
-      prev.l > prev2.h && prev.l > curr.h) { 
-      return { name: 'Bebé Abandonado Bajista', type: 'put', score: 6 };
+  if (isGreen(prev2) && isDoji(prev) && isRed(curr) &&
+      getBody(prev) < getBody(prev2) * 0.15 &&
+      getBody(prev) < getBody(curr) * 0.15 &&
+      (prev.h - prev.l) < getBody(prev2) * 0.3 &&
+      curr.c < getBodyMiddle(prev2)) {
+    return { name: 'Bebé Abandonado Bajista', type: 'put', score: 5 };
   }
 
   // Three Inside Up/Down (Confirmación de Harami)
@@ -2006,37 +2186,25 @@ function checkThreeCandlePattern(curr, prev, prev2, trend) {
   return null;
 }
 
-// ============= DETECCIÓN DE SEÑALES (MEJORADA V13 - PDF + MOMENTUM + BREAKOUTS) =============
+// ============= DETECCIÓN DE SEÑALES V16 - CONFLUENCIA S/R + CALIDAD =============
 function detectSignal(liveCandle) {
-  // LOGS DE DEPURACIÓN DE BLOQUEOS
+  // Bloqueos operativos
   if (isStopPending) {
-      if (Math.random() < 0.05) logMonitor('🚫 Señales bloqueadas: Stop Pendiente', 'info');
-      return null;
-  }
-  if (pendingTrades.length > 0) {
-      if (!tradeExecutedThisCandle && Math.random() < 0.05) logMonitor(`⏳ Esperando resultado trade (${pendingTrades.length})...`, 'info');
-      return null;
-  }
-  if (activeMartingaleTrade) {
-      // Prioridad MG
-      return null;
-  }
-
-  // V12: Verificar estado de warmup
-  checkWarmupStatus();
-
-  // V12: No operar si el sistema no está 100% listo
-  if (!isSystemWarmedUp) {
+    if (Math.random() < 0.05) logMonitor('🚫 Señales bloqueadas: Stop Pendiente', 'info');
     return null;
   }
+  if (pendingTrades.length > 0) {
+    if (!tradeExecutedThisCandle && Math.random() < 0.05) logMonitor(`⏳ Esperando resultado trade (${pendingTrades.length})...`, 'info');
+    return null;
+  }
+  if (activeMartingaleTrade) return null;
+
+  checkWarmupStatus();
+  if (!isSystemWarmedUp) return null;
 
   const baseCandles = getAnalysisCandles();
   const analysisCandles = [...baseCandles];
-
-  if (liveCandle && !config.operateOnNext) {
-    analysisCandles.push(liveCandle);
-  }
-
+  if (liveCandle && !config.operateOnNext) analysisCandles.push(liveCandle);
   if (analysisCandles.length < 5) return null;
 
   const i = analysisCandles.length - 1;
@@ -2044,101 +2212,115 @@ function detectSignal(liveCandle) {
   const prev = analysisCandles[i - 1];
   const prev2 = analysisCandles[i - 2];
 
-  const currentTime = Date.now();
-  if (!isCandleClosed(prev, currentTime)) {
+  if (!isCandleClosed(prev, Date.now())) return null;
+
+  // === FILTRO DE CALIDAD DE MERCADO ===
+  if (isChoppyMarket(analysisCandles)) {
+    if (Math.random() < 0.02) logMonitor('⏸ Mercado choppy - esperando', 'info');
     return null;
   }
+  if (!isMinimumQuality(now, analysisCandles)) return null;
 
+  // === CALCULAR S/R Y MOMENTUM ===
   const { supports, resistances } = getLevels(analysisCandles, i);
   const nearSupport = isNearLevel(now.l, supports);
   const nearResistance = isNearLevel(now.h, resistances);
-
-  // Detectar Momentum
   const momentumBullish = isStrongMomentum(analysisCandles, 'bullish');
   const momentumBearish = isStrongMomentum(analysisCandles, 'bearish');
 
   let signal = null;
   let strategy = '';
-  
-  // --- 1. DETECCIÓN DE PATRONES DE VELA (REVERSIÓN) ---
-  
-  // 3 Velas
+  let confluence = 0;
+
+  // --- 1. PATRONES DE 3 VELAS (mayor prioridad) ---
   const p3 = checkThreeCandlePattern(now, prev, prev2, currentTrend);
-  if (p3) {
+  if (p3 && p3.type !== 'neutral') {
+    const conf = getSignalConfluence(p3, nearSupport, nearResistance, currentTrend);
+    if (conf >= MIN_CONFLUENCE) {
       signal = p3.type;
       strategy = p3.name;
-  }
-  
-  // 2 Velas
-  if (!signal) {
-      const p2 = checkTwoCandlePattern(now, prev, currentTrend);
-      if (p2) {
-          signal = p2.type;
-          strategy = p2.name;
-      }
-  }
-  
-  // 1 Vela (Solo con S/R)
-  if (!signal) {
-      const p1 = checkSingleCandlePattern(now, currentTrend);
-      if (p1) {
-          if ((p1.type === 'call' && nearSupport) || (p1.type === 'put' && nearResistance)) {
-              signal = p1.type;
-              strategy = p1.name + ' (en Zona)';
-          }
-      }
-  }
-
-  // Falsa Ruptura (Price Action)
-  if (!signal) {
-    if (supports.some(s => now.l < s && now.c > s && isRed(prev))) {
-      signal = 'call'; strategy = 'Falsa Ruptura Soporte';
-    } else if (resistances.some(r => now.h > r && now.c < r && isGreen(prev))) {
-      signal = 'put'; strategy = 'Falsa Ruptura Resistencia';
+      confluence = conf;
+    } else {
+      logMonitor(`⏭ ${p3.name} rechazada (C:${conf} < ${MIN_CONFLUENCE})`, 'info');
     }
   }
 
-  // === FILTRO DE MOMENTUM PARA REVERSIONES ===
-  // Si detectamos una señal de reversión, verificamos que no vayamos contra un tren fuerte
-  if (signal) {
-      if (signal === 'call' && momentumBearish) {
-          logMonitor(`⚠️ Señal CALL anulada por Momentum Bajista`, 'info');
-          signal = null;
-      } else if (signal === 'put' && momentumBullish) {
-          logMonitor(`⚠️ Señal PUT anulada por Momentum Alcista`, 'info');
-          signal = null;
+  // --- 2. PATRONES DE 2 VELAS ---
+  if (!signal) {
+    const p2 = checkTwoCandlePattern(now, prev, currentTrend);
+    if (p2 && p2.type !== 'neutral') {
+      const conf = getSignalConfluence(p2, nearSupport, nearResistance, currentTrend);
+      if (conf >= MIN_CONFLUENCE) {
+        signal = p2.type;
+        strategy = p2.name;
+        confluence = conf;
+      } else {
+        logMonitor(`⏭ ${p2.name} rechazada (C:${conf} < ${MIN_CONFLUENCE})`, 'info');
       }
+    }
   }
 
-  // --- 2. DETECCIÓN DE RUPTURAS VÁLIDAS (CONTINUACIÓN) ---
-  // Si no hay señal de reversión, buscamos Breakouts a favor del movimiento
+  // --- 3. PATRONES DE 1 VELA (requieren S/R por naturaleza) ---
   if (!signal) {
-      const avgBody = getAvgBody(baseCandles);
-      
-      // Ruptura de Resistencia (CALL)
-      // Buscamos una resistencia que haya sido cruzada y cerrada por encima
-      const brokenRes = resistances.find(r => prev.c <= r && now.c > r); 
-      if (brokenRes) {
-          const bodySize = getBody(now);
-          // Validar fuerza: Cuerpo grande, cierra cerca del máximo
-          if (bodySize > avgBody * 1.2 && getUpperWick(now) < bodySize * 0.3) {
-              signal = 'call';
-              strategy = 'Ruptura de Resistencia (Breakout)';
-          }
+    const p1 = checkSingleCandlePattern(now, currentTrend);
+    if (p1 && p1.type !== 'neutral') {
+      const conf = getSignalConfluence(p1, nearSupport, nearResistance, currentTrend);
+      if (conf >= MIN_CONFLUENCE) {
+        signal = p1.type;
+        strategy = p1.name + ' (en Zona)';
+        confluence = conf;
       }
+    }
+  }
 
-      // Ruptura de Soporte (PUT)
+  // --- 4. FALSA RUPTURA (inherentemente en S/R) ---
+  if (!signal) {
+    if (supports.some(s => now.l < s && now.c > s && isRed(prev))) {
+      signal = 'call'; strategy = 'Falsa Ruptura Soporte'; confluence = 7;
+    } else if (resistances.some(r => now.h > r && now.c < r && isGreen(prev))) {
+      signal = 'put'; strategy = 'Falsa Ruptura Resistencia'; confluence = 7;
+    }
+  }
+
+  // === FILTRO DE MOMENTUM ===
+  if (signal) {
+    if (signal === 'call' && momentumBearish) {
+      logMonitor(`⚠ CALL anulada: Momentum Bajista fuerte`, 'info');
+      signal = null;
+    } else if (signal === 'put' && momentumBullish) {
+      logMonitor(`⚠ PUT anulada: Momentum Alcista fuerte`, 'info');
+      signal = null;
+    }
+  }
+
+  // --- 5. BREAKOUTS (señales de continuación, inherentemente en S/R) ---
+  if (!signal) {
+    const avgBody = getAvgBody(baseCandles);
+
+    const brokenRes = resistances.find(r => prev.c <= r && now.c > r);
+    if (brokenRes) {
+      const bodySize = getBody(now);
+      if (bodySize > avgBody * 1.2 && getUpperWick(now) < bodySize * 0.3) {
+        signal = 'call';
+        strategy = 'Ruptura de Resistencia (Breakout)';
+        confluence = 7;
+      }
+    }
+
+    if (!signal) {
       const brokenSup = supports.find(s => prev.c >= s && now.c < s);
       if (brokenSup) {
-          const bodySize = getBody(now);
-          // Validar fuerza: Cuerpo grande, cierra cerca del mínimo
-          if (bodySize > avgBody * 1.2 && getLowerWick(now) < bodySize * 0.3) {
-              signal = 'put';
-              strategy = 'Ruptura de Soporte (Breakout)';
-          }
+        const bodySize = getBody(now);
+        if (bodySize > avgBody * 1.2 && getLowerWick(now) < bodySize * 0.3) {
+          signal = 'put';
+          strategy = 'Ruptura de Soporte (Breakout)';
+          confluence = 7;
+        }
       }
+    }
   }
-  
+
+  // === SEÑAL FINAL ===
   if (signal) {
     let displayType = signal;
     let note = '';
@@ -2148,7 +2330,8 @@ function detectSignal(liveCandle) {
     }
 
     const trendTag = currentTrend !== 'neutral' ? ` [${currentTrend.toUpperCase()}]` : '';
-    logMonitor(`🚀 ${strategy} → ${displayType.toUpperCase()}${note}${trendTag}`, 'pattern');
+    const srTag = nearSupport || nearResistance ? ' [S/R]' : '';
+    logMonitor(`🚀 ${strategy} → ${displayType.toUpperCase()}${note}${trendTag}${srTag} [C:${confluence}]`, 'pattern');
 
     return { d: signal, strategy: strategy };
   }
@@ -2227,35 +2410,56 @@ function onTick(data) {
       l: data.closePrice, c: data.closePrice, v: data.volume
     };
     
-    // Martingala V12: Verificar condiciones antes de ejecutar
-    // NOTA: Si isStopPending es true, AÚN ASÍ ejecutamos martingala para intentar recuperar
+    // Martingala V16: Verificar condiciones INTELIGENTES antes de ejecutar
     if (activeMartingaleTrade && config.useMartingale) {
-      // Prioridad absoluta a la Martingala: No buscar nuevas señales
       pendingSignal = null;
-      
-      // Mostrar en UI que estamos evaluando Martingala
-      if (DOM.signalBox) {
-         DOM.signalBox.className = 'sig-waiting';
-         DOM.signalStatus.innerHTML = `
-           <div class="signal-title" style="color:#ffff00;font-size:12px">EVALUANDO MARTINGALA</div>
-           <div class="signal-subtitle" style="color:#fff;font-size:10px">Verificando probabilidad...</div>`;
-      }
+      const mgType = activeMartingaleTrade.type;
 
-      // Ejecutar martingala directamente - sin restricciones
-      logMonitor(`⚡ Ejecutando Martingala Nivel ${mgLevel}`, 'success');
-      if (config.autoTrade) {
-          // Pequeño delay para asegurar apertura de vela
-          const mgType = activeMartingaleTrade.type;
-          activeMartingaleTrade = null; // Consumir antes del timeout
-          setTimeout(() => {
-              executeTrade(mgType);
-              const entryPrice = getCurrentPrice();
-              pendingTrades.push({ k: currentCandle.s, type: mgType, entryPrice: entryPrice });
-              tradeExecutedThisCandle = true;
-              lastTradeType = mgType;
-          }, 500);
+      // Evaluar condiciones de mercado antes de doblar
+      if (!shouldExecuteMartingale(mgType)) {
+        // Condiciones desfavorables: PAUSAR MG (no resetear)
+        if (DOM.signalBox) {
+          DOM.signalBox.className = 'sig-waiting';
+          DOM.signalStatus.innerHTML = `
+            <div class="signal-title" style="color:#ff8800;font-size:12px">MG NIVEL ${mgLevel} EN ESPERA</div>
+            <div class="signal-subtitle" style="color:#fff;font-size:10px">Esperando condiciones favorables...</div>`;
+        }
+        logMonitor(`⏳ MG Nivel ${mgLevel} en espera - condiciones desfavorables`, 'pattern');
+
+        // Safety timeout: Si MG lleva 5+ velas esperando, resetear ciclo
+        if (!activeMartingaleTrade.waitingSince) {
+          activeMartingaleTrade.waitingSince = Date.now();
+        } else if (Date.now() - activeMartingaleTrade.waitingSince > 5 * 60000) {
+          logMonitor(`⛔ MG timeout: reseteando ciclo tras 5 velas de espera`, 'blocked');
+          stats.l++;
+          sessionStats.l++;
+          mgLevel = 0;
+          activeMartingaleTrade = null;
+          updateStats();
+        }
+        // Dejar activeMartingaleTrade intacto para reintentar en la siguiente vela
       } else {
-           activeMartingaleTrade = null;
+        // Condiciones OK: Ejecutar martingala
+        if (DOM.signalBox) {
+          DOM.signalBox.className = 'sig-waiting';
+          DOM.signalStatus.innerHTML = `
+            <div class="signal-title" style="color:#ffff00;font-size:12px">EJECUTANDO MARTINGALA</div>
+            <div class="signal-subtitle" style="color:#fff;font-size:10px">Nivel ${mgLevel} - Condiciones OK</div>`;
+        }
+
+        logMonitor(`⚡ Ejecutando Martingala Nivel ${mgLevel}`, 'success');
+        if (config.autoTrade) {
+          activeMartingaleTrade = null;
+          setTimeout(() => {
+            executeTrade(mgType);
+            const entryPrice = getCurrentPrice();
+            pendingTrades.push({ k: currentCandle.s, type: mgType, entryPrice: entryPrice });
+            tradeExecutedThisCandle = true;
+            lastTradeType = mgType;
+          }, 500);
+        } else {
+          activeMartingaleTrade = null;
+        }
       }
     }
   } else {
