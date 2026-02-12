@@ -2622,38 +2622,12 @@ function detectSignal(liveCandle) {
   let signal = null;
   let strategy = '';
   let confluence = 0;
-  const avgBody = getAvgBody(baseCandles);
 
-  // --- 1. FALSA RUPTURA (rebote en S/R) ---
+  // --- FALSA RUPTURA (rebote en S/R) ---
   if (supports.some(s => now.l < s && now.c > s && isRed(prev))) {
     signal = 'call'; strategy = 'Falsa Ruptura Soporte'; confluence = 7;
   } else if (resistances.some(r => now.h > r && now.c < r && isGreen(prev))) {
     signal = 'put'; strategy = 'Falsa Ruptura Resistencia'; confluence = 7;
-  }
-
-  // --- 2. BREAKOUT (ruptura de nivel con fuerza) ---
-  if (!signal) {
-    const brokenRes = resistances.find(r => prev.c <= r && now.c > r);
-    if (brokenRes) {
-      const bodySize = getBody(now);
-      if (bodySize > avgBody * 1.2 && getUpperWick(now) < bodySize * 0.3) {
-        signal = 'call';
-        strategy = 'Ruptura de Resistencia';
-        confluence = 7;
-      }
-    }
-
-    if (!signal) {
-      const brokenSup = supports.find(s => prev.c >= s && now.c < s);
-      if (brokenSup) {
-        const bodySize = getBody(now);
-        if (bodySize > avgBody * 1.2 && getLowerWick(now) < bodySize * 0.3) {
-          signal = 'put';
-          strategy = 'Ruptura de Soporte';
-          confluence = 7;
-        }
-      }
-    }
   }
 
   // === FILTROS POST-SEÑAL (momentum, EMA, RSI) ===
