@@ -175,6 +175,16 @@ const HUD_HTML = `
       <div class="switch-toggle"></div>
     </div>
 
+    <div class="config-section-title">FILTROS</div>
+    <div class="switch-box" id="sw-ema">
+      <span class="switch-label">Filtro EMA 8/21</span>
+      <div class="switch-toggle"></div>
+    </div>
+    <div class="switch-box" id="sw-rsi">
+      <span class="switch-label">Filtro RSI 14</span>
+      <div class="switch-toggle"></div>
+    </div>
+
     <div class="config-section-title">PARÁMETROS</div>
     <div class="config-row">
       <span class="config-label">% Riesgo</span>
@@ -296,6 +306,8 @@ let config = {
   invertTrade: false,
   useConfirmation: false,
   operateOnNext: false,
+  useEmaFilter: false,
+  useRsiFilter: false,
   riskPct: 1,
   mgMaxSteps: 3,
   mgFactor: 2.0,
@@ -816,8 +828,8 @@ function shouldExecuteMartingale(tradeType) {
     return false;
   }
 
-  // Gate 3: No doblar contra dirección de EMA
-  if (candles.length >= 21) {
+  // Gate 3: No doblar contra dirección de EMA (solo si filtro EMA activado)
+  if (config.useEmaFilter && candles.length >= 21) {
     const ind = getIndicators(candles);
     if (ind.emaFast !== null && ind.emaSlow !== null) {
       if (tradeType === 'call' && ind.emaFast < ind.emaSlow) {
@@ -829,8 +841,11 @@ function shouldExecuteMartingale(tradeType) {
         return false;
       }
     }
+  }
 
-    // Gate 4: No comprar sobrecomprado / no vender sobrevendido
+  // Gate 4: No comprar sobrecomprado / no vender sobrevendido (solo si filtro RSI activado)
+  if (config.useRsiFilter && candles.length >= 21) {
+    const ind = getIndicators(candles);
     if (tradeType === 'call' && ind.rsi > 70) {
       logMonitor(`⏸ MG CALL pausada: RSI sobrecomprado (${ind.rsi.toFixed(0)})`, 'blocked');
       return false;
@@ -1085,6 +1100,8 @@ function initSystem() {
       swInv: $('sw-inv'),
       swConfirm: $('sw-confirm'),
       swNext: $('sw-next'),
+      swEma: $('sw-ema'),
+      swRsi: $('sw-rsi'),
       swTime: $('sw-time'),
       swRisk: $('sw-risk'),
       swTrades: $('sw-trades'),
@@ -1209,6 +1226,20 @@ function initSystem() {
       config.operateOnNext = !config.operateOnNext;
       this.classList.toggle('active', config.operateOnNext);
       logMonitor(`Modo: ${config.operateOnNext ? 'SIGUIENTE VELA' : 'VELA ACTUAL'}`);
+      saveConfigToStorage();
+    };
+
+    // Filtros EMA y RSI
+    if (DOM.swEma) DOM.swEma.onclick = function() {
+      config.useEmaFilter = !config.useEmaFilter;
+      this.classList.toggle('active', config.useEmaFilter);
+      logMonitor(`Filtro EMA: ${config.useEmaFilter ? 'ON' : 'OFF'}`);
+      saveConfigToStorage();
+    };
+    if (DOM.swRsi) DOM.swRsi.onclick = function() {
+      config.useRsiFilter = !config.useRsiFilter;
+      this.classList.toggle('active', config.useRsiFilter);
+      logMonitor(`Filtro RSI: ${config.useRsiFilter ? 'ON' : 'OFF'}`);
       saveConfigToStorage();
     };
 
@@ -1983,6 +2014,8 @@ function saveConfigToStorage() {
     invertTrade: config.invertTrade,
     useConfirmation: config.useConfirmation,
     operateOnNext: config.operateOnNext,
+    useEmaFilter: config.useEmaFilter,
+    useRsiFilter: config.useRsiFilter,
     riskPct: config.riskPct,
     mgMaxSteps: config.mgMaxSteps,
     mgFactor: config.mgFactor,
@@ -2023,6 +2056,8 @@ function applyConfigToUI() {
   DOM.swInv.classList.toggle('active', config.invertTrade);
   if (DOM.swConfirm) DOM.swConfirm.classList.toggle('active', config.useConfirmation);
   if (DOM.swNext) DOM.swNext.classList.toggle('active', config.operateOnNext);
+  if (DOM.swEma) DOM.swEma.classList.toggle('active', config.useEmaFilter);
+  if (DOM.swRsi) DOM.swRsi.classList.toggle('active', config.useRsiFilter);
 
   // Inputs numéricos
   if (DOM.riskPct) DOM.riskPct.value = config.riskPct;
@@ -2641,8 +2676,8 @@ function detectSignal(liveCandle) {
       signal = null;
     }
 
-    // Filtro EMA
-    if (signal && hasEMA) {
+    // Filtro EMA (solo si está activado)
+    if (signal && config.useEmaFilter && hasEMA) {
       if (signal === 'call' && emaDowntrend && !nearSupport) {
         logMonitor(`⚠ CALL anulada: EMA bajista (sin soporte)`, 'info');
         signal = null;
@@ -2652,8 +2687,8 @@ function detectSignal(liveCandle) {
       }
     }
 
-    // Filtro RSI
-    if (signal) {
+    // Filtro RSI (solo si está activado)
+    if (signal && config.useRsiFilter) {
       if (signal === 'call' && rsiOverbought) {
         logMonitor(`⚠ CALL anulada: RSI sobrecomprado (${ind.rsi.toFixed(0)})`, 'info');
         signal = null;
