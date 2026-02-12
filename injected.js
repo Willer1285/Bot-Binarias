@@ -9,6 +9,7 @@ const VERSION = '15.0';
 const TARGET_CANDLES = 2;
 const TARGET_CANDLES_FULL = 3;
 const MIN_CANDLES_FOR_SR = 7;    // Mínimo de velas para detectar S/R (pivotes necesitan 2+2 a cada lado)
+const WARMUP_EFFECTIVE_TARGET = 10; // Velas reales estimadas para que el sistema esté listo (S/R + indicadores)
 const MAX_CANDLES = 200;
 const MAX_LOGS = 50; // Aumentado para ver más historial
 const HEALTH_CHECK_INTERVAL = 3000;
@@ -564,8 +565,7 @@ function updateWarmupUI() {
     if (isSystemWarmedUp) {
       DOM.warmupText.textContent = 'Listo';
     } else {
-      const analysisCandles = getAnalysisCandles();
-      DOM.warmupText.textContent = `Velas ${analysisCandles.length}/${TARGET_CANDLES_FULL}`;
+      DOM.warmupText.textContent = 'Cargando datos...';
     }
   }
 
@@ -983,23 +983,12 @@ function startBot() {
 // ============= FUNCIONES DE ESTADO (Movidias arriba para evitar ReferenceError) =============
 function checkWarmupStatus() {
   const currentCandles = candles.length;
-  // Necesitamos TARGET_CANDLES_FULL (3) velas COMPLETAS + S/R detectados
-  const target = TARGET_CANDLES_FULL;
 
-  if (target <= 0) {
-    systemWarmupLevel = 100;
-    isSystemWarmedUp = true;
-    srReady = true;
-    return true;
+  if (currentCandles === 0) {
+    systemWarmupLevel = 0;
+    isSystemWarmedUp = false;
+    return false;
   }
-
-  // Progreso basado en velas (80%) + S/R (20%)
-  const candleProgress = Math.min(100, Math.floor((currentCandles / target) * 80));
-  const srProgress = srReady ? 20 : 0;
-  systemWarmupLevel = Math.min(100, candleProgress + srProgress);
-
-  // Sistema listo solo si tiene suficientes velas Y S/R detectados
-  isSystemWarmedUp = currentCandles >= target && srReady;
 
   // Verificar S/R si hay suficientes velas
   if (!srReady && currentCandles >= MIN_CANDLES_FOR_SR) {
@@ -1008,6 +997,21 @@ function checkWarmupStatus() {
       srReady = true;
       logMonitor(`✓ S/R detectados: ${supports.length}S ${resistances.length}R - Sistema listo`, 'success');
     }
+  }
+
+  if (srReady) {
+    // S/R detectados = sistema 100% listo
+    systemWarmupLevel = 100;
+    isSystemWarmedUp = true;
+  } else {
+    // Progreso gradual: 0-90% basado en velas acumuladas, 100% solo con S/R
+    const candleProgress = Math.min(90, Math.floor((currentCandles / WARMUP_EFFECTIVE_TARGET) * 90));
+    // Después de MIN_CANDLES_FOR_SR, agregar progreso lento extra por cada vela adicional
+    const extraProgress = currentCandles > MIN_CANDLES_FOR_SR
+      ? Math.min(9, (currentCandles - MIN_CANDLES_FOR_SR) * 3)
+      : 0;
+    systemWarmupLevel = Math.min(99, candleProgress + extraProgress);
+    isSystemWarmedUp = false;
   }
 
   return isSystemWarmedUp;
@@ -2917,8 +2921,8 @@ function updateSignalUI(sec, key) {
   if (!isSystemWarmedUp) {
     DOM.signalBox.className = 'sig-waiting';
     DOM.signalStatus.innerHTML = `
-      <div class="signal-title" style="color:#ff00ff;font-size:12px">CARGANDO SISTEMA</div>
-      <div class="signal-subtitle" style="color:#00ffff;font-size:9px">Esperando ${TARGET_CANDLES_FULL} velas...</div>`;
+      <div class="signal-title" style="color:#ff00ff;font-size:12px">CARGANDO DATOS</div>
+      <div class="signal-subtitle" style="color:#00ffff;font-size:9px">${systemWarmupLevel}% - Detectando S/R...</div>`;
     return;
   }
 
@@ -3031,10 +3035,9 @@ function updateBotUI() {
     } else if (!isSystemWarmedUp) {
       // Sistema cargando
       DOM.signalBox.className = 'sig-waiting';
-      const analysisCandles = getAnalysisCandles();
       DOM.signalStatus.innerHTML = `
-        <div class="signal-title" style="color:#ff00ff;font-size:12px">CARGANDO SISTEMA</div>
-        <div class="signal-subtitle" style="color:#00ffff;font-size:9px">${systemWarmupLevel}% - ${analysisCandles.length}/${TARGET_CANDLES_FULL} velas</div>`;
+        <div class="signal-title" style="color:#ff00ff;font-size:12px">CARGANDO DATOS</div>
+        <div class="signal-subtitle" style="color:#00ffff;font-size:9px">${systemWarmupLevel}% - Detectando S/R...</div>`;
     } else if (tradeExecutedThisCandle || pendingTrades.length > 0) {
       // Trade en progreso
       const isCall = lastTradeType === 'call';
