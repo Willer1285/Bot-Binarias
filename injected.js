@@ -365,14 +365,6 @@ let activeWebSocket = null;
 let wsHeartbeatInterval = null;
 let lastWsMessageTime = 0;
 
-// ============= SISTEMA HÍBRIDO DOM + WebSocket =============
-let dataSource = 'websocket';      // 'websocket' | 'dom' | 'none'
-let domPriceElement = null;        // Elemento DOM cacheado que muestra el precio
-let domPollInterval = null;        // Intervalo de polling DOM
-let lastDomPrice = 0;              // Último precio leído del DOM
-let domCalibrated = false;         // Si ya encontramos el elemento de precio
-let domTickCount = 0;              // Contador de ticks DOM (para log periódico)
-
 // ============= NUEVO V12: MONITOR DE TRADE EN TIEMPO REAL =============
 let activeTradeMonitor = null;     // Trade activo siendo monitoreado
 let tradeProgressData = [];        // Historial de precios durante el trade
@@ -540,9 +532,6 @@ function calcAmount() {
 function getCurrentPrice() {
   if (lastWsData && lastWsData.closePrice) return lastWsData.closePrice;
   if (currentCandle && currentCandle.c) return currentCandle.c;
-  // Fallback: leer precio directo del DOM
-  const domPrice = readPriceFromDOM();
-  if (domPrice > 0) return domPrice;
   return 0;
 }
 
@@ -642,8 +631,8 @@ function executeTrade(type) {
     return false;
   }
 
-  if (!wsConnected && dataSource !== 'dom') {
-    logMonitor('⚠️ Sin conexión - Trade cancelado', 'blocked');
+  if (!wsConnected) {
+    logMonitor('⚠️ Sin conexión WebSocket - Trade cancelado', 'blocked');
     return false;
   }
 
@@ -908,25 +897,19 @@ function startBot() {
 
   setupWebSocketInterceptor();
 
-  // Health check + activación automática de DOM fallback
+  // Health check
   if (healthCheckInterval) clearInterval(healthCheckInterval);
   healthCheckInterval = setInterval(() => {
     if (!isRunning) return;
     const elapsed = Date.now() - lastTickTime;
     if (elapsed > DATA_TIMEOUT && lastTickTime > 0) {
-      if (dataSource !== 'dom') {
-        logMonitor('⚠ Sin datos WS - activando lectura DOM...', 'pattern');
-        startDOMPolling();
-      }
+      logMonitor('⚠ Sin datos. Verificando...', 'blocked');
+      updateConnectionUI(false);
     }
   }, HEALTH_CHECK_INTERVAL);
 
   startUIUpdateLoop();
   startAntiIdle();
-
-  // Calibrar DOM reader con delay (esperar a que la página cargue precios)
-  setTimeout(() => calibrateDOMReader(), 5000);
-  setTimeout(() => calibrateDOMReader(), 15000);
 
   // Diagnóstico inicial con pequeño delay
   setTimeout(() => runDiagnostics(), 500);
@@ -998,7 +981,6 @@ function stopBot(force = false) {
 
   stopAntiIdle();
   stopUIUpdateLoop();
-  stopDOMPolling();
   
   // Resetear estados visuales
   if (DOM.mainBtn) {
@@ -1384,13 +1366,8 @@ function setupWebSocketInterceptor() {
         sioNamespaceConnected = false;
         activeWebSocket = null;
         stopSioPing();
-        logMonitor(`⚠ WebSocket cerrado (código: ${event.code}) - activando DOM`, 'blocked');
-        // Activar lectura DOM inmediatamente en vez de quedar sin datos
-        if (isRunning && !domPollInterval) {
-          startDOMPolling();
-        } else {
-          updateConnectionUI(false);
-        }
+        logMonitor(`⚠ WebSocket cerrado (código: ${event.code})`, 'blocked');
+        updateConnectionUI(false);
         scheduleReconnect();
       }
       if (isBrokerSocket) {
@@ -1550,20 +1527,15 @@ function checkWsHealth() {
 
   // Solo monitorear estado - la página maneja la conexión
   if (activeWebSocket && activeWebSocket.readyState === WebSocket.OPEN) {
-    // Socket abierto, todo bien - intentar calibrar DOM reader para tenerlo listo
-    if (!domCalibrated) calibrateDOMReader();
     return;
   }
 
-  // Socket cerrado o no existe - activar DOM fallback
+  // Socket cerrado o no existe - actualizar estado
   if (wsConnected) {
+    logMonitor('⚠ Conexión perdida - esperando reconexión...', 'pattern');
     wsConnected = false;
     sioNamespaceConnected = false;
-  }
-
-  // Activar DOM polling si no está activo
-  if (!domPollInterval) {
-    startDOMPolling();
+    updateConnectionUI(false);
   }
 
   // Esperar reconexión automática de Socket.IO de la página
@@ -1602,16 +1574,6 @@ function processWebSocketMessage(data) {
       
       wsConnected = true;
       lastTickTime = Date.now();
-
-      // Si estábamos en modo DOM, volver a WS
-      if (dataSource === 'dom') {
-        stopDOMPolling();
-      }
-
-      // Calibrar DOM reader periódicamente (cada 60 ticks ~= 1 min)
-      if (!domCalibrated && Math.random() < 0.02) {
-        calibrateDOMReader();
-      }
 
       lastWsData = {
         closePrice: parseFloat(priceData.closePrice),
@@ -1670,21 +1632,15 @@ function scheduleReconnect() {
 
     wsReconnectAttempt++;
 
-    // Estrategia escalonada PASIVA (más agresiva con DOM como respaldo):
-    // 1-3: Esperar reconexión automática de Socket.IO (~10s)
-    // 4-6: Simular click en activo para forzar re-suscripción
-    // 7+: Forzar recreación navegando activos
-    // Nota: DOM fallback mantiene datos fluyendo durante todo el proceso
-    if (wsReconnectAttempt <= 3) {
-      if (wsReconnectAttempt === 1) {
-        logMonitor(`⏳ Reconectando WS... (DOM activo como respaldo)`, 'info');
-      }
+    // Estrategia escalonada PASIVA:
+    // 1-4: Esperar reconexión automática de Socket.IO
+    // 5+: Simular click en activo para forzar re-suscripción
+    if (wsReconnectAttempt <= 4) {
+      logMonitor(`⏳ Esperando reconexión (${wsReconnectAttempt}/4)...`, 'info');
       scheduleReconnect();
-    } else if (wsReconnectAttempt <= 6) {
-      attemptRefreshSubscription();
     } else {
-      attemptForcePageReconnect();
-      wsReconnectAttempt = 0;
+      attemptRefreshSubscription();
+      if (wsReconnectAttempt > 8) wsReconnectAttempt = 0;
     }
   }, delay);
 }
@@ -1707,265 +1663,10 @@ function attemptRefreshSubscription() {
   scheduleReconnect();
 }
 
-/**
- * Estrategia 3: Forzar que la página recree sus conexiones WebSocket
- * Como último recurso, navega entre activos para forzar nueva conexión
- */
-function attemptForcePageReconnect() {
-  logMonitor('🔄 Forzando reconexión de página...', 'pattern');
-  try {
-    // Método 1: Simular cambio de activo ida y vuelta
-    const pairItems = document.querySelectorAll('[class*="symbol-item"], [class*="pair-item"], [class*="asset-item"]');
-    if (pairItems.length > 1) {
-      const otherItem = pairItems[1];
-      otherItem.click();
-      setTimeout(() => {
-        pairItems[0].click();
-        logMonitor('✓ Activo refrescado', 'success');
-      }, 2000);
-      return;
-    }
-
-    // Método 2: Recargar iframe del gráfico
-    const chartFrames = document.querySelectorAll('iframe');
-    for (const frame of chartFrames) {
-      if (frame.src && (frame.src.includes('chart') || frame.src.includes('tradingview'))) {
-        frame.src = frame.src;
-        logMonitor('✓ Gráfico recargado', 'success');
-        return;
-      }
-    }
-  } catch(e) {}
-  scheduleReconnect();
-}
-
 function updateConnectionUI(connected) {
   if (DOM.dot) {
-    if (connected && dataSource === 'dom') {
-      // Naranja = DOM fallback activo (funcional pero degradado)
-      DOM.dot.style.background = '#ff8800';
-      DOM.dot.style.boxShadow = '0 0 8px #ff8800';
-    } else {
-      DOM.dot.style.background = connected ? '#00e676' : '#e74c3c';
-      DOM.dot.style.boxShadow = connected ? '0 0 8px #00e676' : '0 0 8px #e74c3c';
-    }
-  }
-}
-
-// ============= SISTEMA HÍBRIDO: LECTURA DOM DE PRECIOS =============
-
-/**
- * Descubre el elemento DOM que muestra el precio actual del activo.
- * Estrategia 1: Selectores CSS comunes en plataformas de trading
- * Estrategia 2: Cross-reference con precio conocido del WebSocket
- */
-function discoverPriceElement() {
-  // Estrategia 1: Selectores CSS típicos de plataformas de trading
-  const selectors = [
-    '[class*="current-price"]',
-    '[class*="price-value"]',
-    '[class*="last-price"]',
-    '[class*="asset-price"]',
-    '[class*="symbol-price"]',
-    '[class*="market-price"]',
-    '[class*="close-price"]',
-    '[class*="live-price"]',
-    '[class*="quote-value"]',
-    '[class*="rate-value"]',
-    '[class*="ticker-price"]',
-    // Ant Design statistic component
-    '[class*="statistic-content"] [class*="value"]',
-    '[class*="statistic"] [class*="content"]',
-  ];
-
-  for (const sel of selectors) {
-    try {
-      const els = document.querySelectorAll(sel);
-      for (const el of els) {
-        if (el.closest('#worbit-hud')) continue; // Excluir nuestro HUD
-        if (isValidPriceElement(el)) return el;
-      }
-    } catch(e) {}
-  }
-
-  // Estrategia 2: Cross-reference con precio WS conocido
-  if (lastWsData && lastWsData.closePrice > 0) {
-    const target = lastWsData.closePrice;
-    const targetStr = target.toFixed(2);
-    const targetInt = Math.floor(target).toString();
-
-    // Buscar en spans y divs visibles
-    const candidates = document.querySelectorAll('span, div, td, p');
-    for (const el of candidates) {
-      if (el.closest('#worbit-hud')) continue;
-      if (el.children.length > 3) continue;
-      if (!el.offsetParent) continue;
-
-      const text = (el.textContent || '').trim();
-      if (text.length > 20 || text.length < 3) continue;
-
-      // Verificar si contiene el precio exacto o muy cercano
-      const num = parseFloat(text.replace(/[,$\s]/g, ''));
-      if (!isNaN(num) && num > 1) {
-        const diff = Math.abs(num - target) / target;
-        if (diff < 0.0005) { // Dentro del 0.05%
-          return el;
-        }
-      }
-    }
-  }
-
-  return null;
-}
-
-/**
- * Valida que un elemento DOM contiene un precio numérico válido
- */
-function isValidPriceElement(el) {
-  if (!el || !el.isConnected) return false;
-  if (!el.offsetParent && el.style.display !== 'contents') return false;
-  const text = (el.textContent || '').trim();
-  if (text.length > 20 || text.length < 2) return false;
-  const num = parseFloat(text.replace(/[,$\s]/g, ''));
-  return !isNaN(num) && num > 1;
-}
-
-/**
- * Lee el precio actual directamente del DOM de la página
- */
-function readPriceFromDOM() {
-  // Método 1: Elemento cacheado
-  if (domPriceElement && domPriceElement.isConnected) {
-    const text = (domPriceElement.textContent || '').trim();
-    const price = parseFloat(text.replace(/[,$\s]/g, ''));
-    if (!isNaN(price) && price > 0) return price;
-  }
-
-  // Método 2: Re-descubrir elemento
-  domPriceElement = discoverPriceElement();
-  if (domPriceElement) {
-    const text = (domPriceElement.textContent || '').trim();
-    const price = parseFloat(text.replace(/[,$\s]/g, ''));
-    if (!isNaN(price) && price > 0) return price;
-  }
-
-  // Método 3: Zustand store (algunos brokers guardan precios en localStorage)
-  try {
-    const keys = Object.keys(localStorage);
-    for (const key of keys) {
-      if (key.includes('price') || key.includes('symbol') || key.includes('market')) {
-        const val = localStorage.getItem(key);
-        if (val && val.startsWith('{')) {
-          const parsed = JSON.parse(val);
-          if (parsed.state && parsed.state.price) return parseFloat(parsed.state.price);
-          if (parsed.state && parsed.state.lastPrice) return parseFloat(parsed.state.lastPrice);
-        }
-      }
-    }
-  } catch(e) {}
-
-  return 0;
-}
-
-/**
- * Inicia polling DOM cuando WebSocket está caído.
- * Lee el precio de la página cada 500ms y alimenta onTick().
- */
-function startDOMPolling() {
-  if (domPollInterval) return; // Ya está activo
-
-  dataSource = 'dom';
-  domTickCount = 0;
-  logMonitor('🔄 Modo DOM activado - leyendo precio de la página', 'pattern');
-
-  // Intentar descubrir elemento de precio ahora
-  if (!domPriceElement || !domPriceElement.isConnected) {
-    domPriceElement = discoverPriceElement();
-    if (domPriceElement) {
-      logMonitor('✓ Elemento de precio encontrado en DOM', 'success');
-    } else {
-      logMonitor('⚠ Buscando elemento de precio...', 'info');
-    }
-  }
-
-  updateConnectionUI(true); // Naranja = DOM mode
-
-  domPollInterval = setInterval(() => {
-    // Si WS reconectó, parar polling
-    if (wsConnected && activeWebSocket && activeWebSocket.readyState === WebSocket.OPEN) {
-      stopDOMPolling();
-      return;
-    }
-
-    const price = readPriceFromDOM();
-    if (price > 0) {
-      const priceChanged = Math.abs(price - lastDomPrice) > 0.001;
-      lastDomPrice = price;
-      domTickCount++;
-
-      // Log periódico (cada 30 ticks = ~15 segundos)
-      if (domTickCount % 30 === 1) {
-        logMonitor(`📡 DOM: ${price.toFixed(2)} (${currentPair})`, 'info');
-      }
-
-      // Alimentar onTick con datos DOM
-      if (priceChanged || domTickCount % 2 === 0) {
-        const domData = {
-          closePrice: price,
-          openPrice: currentCandle ? currentCandle.o : price,
-          highPrice: currentCandle ? Math.max(currentCandle.h, price) : price,
-          lowPrice: currentCandle ? Math.min(currentCandle.l, price) : price,
-          time: Date.now(),
-          pair: currentPair || 'UNKNOWN',
-          volume: 0
-        };
-
-        lastWsData = domData;
-        lastTickTime = Date.now();
-
-        if (isSystemReady && isRunning) {
-          onTick(domData);
-        }
-      }
-    } else if (!domPriceElement) {
-      // Reintentar descubrimiento
-      domPriceElement = discoverPriceElement();
-      if (domPriceElement) {
-        logMonitor('✓ Elemento de precio DOM encontrado', 'success');
-      }
-    }
-  }, 500);
-}
-
-/**
- * Detiene polling DOM cuando WebSocket se recupera
- */
-function stopDOMPolling() {
-  if (!domPollInterval) return;
-
-  clearInterval(domPollInterval);
-  domPollInterval = null;
-
-  if (dataSource === 'dom') {
-    dataSource = 'websocket';
-    logMonitor('✓ WebSocket recuperado - modo WS activo', 'success');
-    updateConnectionUI(true);
-  }
-}
-
-/**
- * Auto-calibración: Usa el precio WS conocido para encontrar el elemento DOM correcto.
- * Se ejecuta periódicamente mientras WS funciona, para tener el fallback listo.
- */
-function calibrateDOMReader() {
-  if (domCalibrated) return;
-  if (!lastWsData || !lastWsData.closePrice) return;
-
-  const el = discoverPriceElement();
-  if (el) {
-    domPriceElement = el;
-    domCalibrated = true;
-    logMonitor('✓ DOM calibrado - respaldo listo', 'info');
+    DOM.dot.style.background = connected ? '#00e676' : '#e74c3c';
+    DOM.dot.style.boxShadow = connected ? '0 0 8px #00e676' : '0 0 8px #e74c3c';
   }
 }
 
@@ -3007,12 +2708,11 @@ function runDiagnostics() {
 
   // 3. DATOS DE MERCADO
   logMonitor('📈 Datos de Mercado:', 'info');
-  logMonitor(`   Fuente: ${dataSource.toUpperCase()} ${domCalibrated ? '(DOM calibrado)' : '(DOM no calibrado)'}`, dataSource === 'websocket' ? 'success' : 'pattern');
+  logMonitor(`   Fuente: WebSocket`, wsConnected ? 'success' : 'blocked');
   logMonitor(`   Velas procesadas: ${candles.length}`, 'info');
   if (currentCandle) {
       logMonitor(`   Vela Actual: O:${currentCandle.o} C:${currentCandle.c}`, 'info');
   }
-  logMonitor(`   DOM Precio Element: ${domPriceElement ? 'Encontrado' : 'No encontrado'}`, domPriceElement ? 'success' : 'info');
 
   logMonitor('=================================', 'info');
 }
