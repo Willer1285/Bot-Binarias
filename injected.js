@@ -175,14 +175,11 @@ const HUD_HTML = `
       <div class="switch-toggle"></div>
     </div>
 
-    <div class="config-section-title">FILTROS</div>
-    <div class="switch-box" id="sw-ema">
-      <span class="switch-label">Filtro EMA 8/21</span>
-      <div class="switch-toggle"></div>
-    </div>
-    <div class="switch-box" id="sw-rsi">
-      <span class="switch-label">Filtro RSI 14</span>
-      <div class="switch-toggle"></div>
+    <div class="config-section-title">FILTRO DE TENDENCIA</div>
+    <div class="config-row" style="justify-content:center;gap:4px">
+      <button class="trend-btn" id="trend-off" style="flex:1;padding:4px 0;border:1px solid rgba(0,255,255,.3);background:rgba(0,255,255,.15);color:#0ff;border-radius:6px;cursor:pointer;font-size:10px;font-weight:bold">OFF</button>
+      <button class="trend-btn" id="trend-bull" style="flex:1;padding:4px 0;border:1px solid rgba(0,230,118,.3);background:transparent;color:#888;border-radius:6px;cursor:pointer;font-size:10px;font-weight:bold">ALCISTA</button>
+      <button class="trend-btn" id="trend-bear" style="flex:1;padding:4px 0;border:1px solid rgba(255,85,85,.3);background:transparent;color:#888;border-radius:6px;cursor:pointer;font-size:10px;font-weight:bold">BAJISTA</button>
     </div>
 
     <div class="config-section-title">PARÁMETROS</div>
@@ -306,8 +303,7 @@ let config = {
   invertTrade: false,
   useConfirmation: false,
   operateOnNext: false,
-  useEmaFilter: false,
-  useRsiFilter: false,
+  trendFilter: 'off',    // 'off' | 'bullish' | 'bearish'
   riskPct: 1,
   mgMaxSteps: 3,
   mgFactor: 2.0,
@@ -812,59 +808,14 @@ function checkSafeStop() {
 }
 
 function shouldExecuteMartingale(tradeType) {
-  // Gate 1: No doblar en mercado choppy
-  if (candles.length >= 8 && isChoppyMarket(candles)) {
-    logMonitor('⏸ MG pausada: Mercado lateral', 'info');
-    return false;
-  }
-
-  // Gate 2: No doblar contra momentum fuerte
-  if (tradeType === 'call' && isStrongMomentum(candles, 'bearish')) {
-    logMonitor('⏸ MG CALL pausada: Momentum bajista fuerte', 'blocked');
-    return false;
-  }
-  if (tradeType === 'put' && isStrongMomentum(candles, 'bullish')) {
-    logMonitor('⏸ MG PUT pausada: Momentum alcista fuerte', 'blocked');
-    return false;
-  }
-
-  // Gate 3: No doblar contra dirección de EMA (solo si filtro EMA activado)
-  if (config.useEmaFilter && candles.length >= 21) {
-    const ind = getIndicators(candles);
-    if (ind.emaFast !== null && ind.emaSlow !== null) {
-      if (tradeType === 'call' && ind.emaFast < ind.emaSlow) {
-        logMonitor(`⏸ MG CALL pausada: EMA bajista`, 'blocked');
-        return false;
-      }
-      if (tradeType === 'put' && ind.emaFast > ind.emaSlow) {
-        logMonitor(`⏸ MG PUT pausada: EMA alcista`, 'blocked');
-        return false;
-      }
-    }
-  }
-
-  // Gate 4: No comprar sobrecomprado / no vender sobrevendido (solo si filtro RSI activado)
-  if (config.useRsiFilter && candles.length >= 21) {
-    const ind = getIndicators(candles);
-    if (tradeType === 'call' && ind.rsi > 70) {
-      logMonitor(`⏸ MG CALL pausada: RSI sobrecomprado (${ind.rsi.toFixed(0)})`, 'blocked');
+  // Filtro de tendencia: no doblar contra la tendencia configurada
+  if (config.trendFilter !== 'off') {
+    if (config.trendFilter === 'bullish' && tradeType === 'put') {
+      logMonitor(`⏸ MG PUT bloqueada: Filtro tendencia ALCISTA`, 'blocked');
       return false;
     }
-    if (tradeType === 'put' && ind.rsi < 30) {
-      logMonitor(`⏸ MG PUT pausada: RSI sobrevendido (${ind.rsi.toFixed(0)})`, 'blocked');
-      return false;
-    }
-  }
-
-  // Gate 5: En niveles MG altos (≥2), requerir S/R cercano
-  if (mgLevel >= 2 && candles.length >= 5) {
-    const idx = candles.length;
-    const { supports, resistances } = getLevels(candles, idx);
-    const price = getCurrentPrice();
-    const nearSR = (tradeType === 'call' && isNearLevel(price, supports)) ||
-                   (tradeType === 'put' && isNearLevel(price, resistances));
-    if (!nearSR) {
-      logMonitor(`⏸ MG Nivel ${mgLevel} pausada: Sin S/R cercano`, 'blocked');
+    if (config.trendFilter === 'bearish' && tradeType === 'call') {
+      logMonitor(`⏸ MG CALL bloqueada: Filtro tendencia BAJISTA`, 'blocked');
       return false;
     }
   }
@@ -1100,8 +1051,9 @@ function initSystem() {
       swInv: $('sw-inv'),
       swConfirm: $('sw-confirm'),
       swNext: $('sw-next'),
-      swEma: $('sw-ema'),
-      swRsi: $('sw-rsi'),
+      trendOff: $('trend-off'),
+      trendBull: $('trend-bull'),
+      trendBear: $('trend-bear'),
       swTime: $('sw-time'),
       swRisk: $('sw-risk'),
       swTrades: $('sw-trades'),
@@ -1229,19 +1181,36 @@ function initSystem() {
       saveConfigToStorage();
     };
 
-    // Filtros EMA y RSI
-    if (DOM.swEma) DOM.swEma.onclick = function() {
-      config.useEmaFilter = !config.useEmaFilter;
-      this.classList.toggle('active', config.useEmaFilter);
-      logMonitor(`Filtro EMA: ${config.useEmaFilter ? 'ON' : 'OFF'}`);
+    // Filtro de tendencia (3 botones: OFF / ALCISTA / BAJISTA)
+    function updateTrendFilterUI() {
+      if (!DOM.trendOff) return;
+      const v = config.trendFilter;
+      DOM.trendOff.style.background = v === 'off' ? 'rgba(0,255,255,.15)' : 'transparent';
+      DOM.trendOff.style.color = v === 'off' ? '#0ff' : '#888';
+      DOM.trendBull.style.background = v === 'bullish' ? 'rgba(0,230,118,.2)' : 'transparent';
+      DOM.trendBull.style.color = v === 'bullish' ? '#00e676' : '#888';
+      DOM.trendBear.style.background = v === 'bearish' ? 'rgba(255,85,85,.2)' : 'transparent';
+      DOM.trendBear.style.color = v === 'bearish' ? '#ff5555' : '#888';
+    }
+    if (DOM.trendOff) DOM.trendOff.onclick = function() {
+      config.trendFilter = 'off';
+      updateTrendFilterUI();
+      logMonitor('Filtro tendencia: OFF (ambas direcciones)', 'info');
       saveConfigToStorage();
     };
-    if (DOM.swRsi) DOM.swRsi.onclick = function() {
-      config.useRsiFilter = !config.useRsiFilter;
-      this.classList.toggle('active', config.useRsiFilter);
-      logMonitor(`Filtro RSI: ${config.useRsiFilter ? 'ON' : 'OFF'}`);
+    if (DOM.trendBull) DOM.trendBull.onclick = function() {
+      config.trendFilter = 'bullish';
+      updateTrendFilterUI();
+      logMonitor('Filtro tendencia: ALCISTA (solo CALL)', 'success');
       saveConfigToStorage();
     };
+    if (DOM.trendBear) DOM.trendBear.onclick = function() {
+      config.trendFilter = 'bearish';
+      updateTrendFilterUI();
+      logMonitor('Filtro tendencia: BAJISTA (solo PUT)', 'blocked');
+      saveConfigToStorage();
+    };
+    updateTrendFilterUI();
 
     // Stop Config Switches
     if (DOM.swTime) DOM.swTime.onclick = function() {
@@ -2014,8 +1983,7 @@ function saveConfigToStorage() {
     invertTrade: config.invertTrade,
     useConfirmation: config.useConfirmation,
     operateOnNext: config.operateOnNext,
-    useEmaFilter: config.useEmaFilter,
-    useRsiFilter: config.useRsiFilter,
+    trendFilter: config.trendFilter,
     riskPct: config.riskPct,
     mgMaxSteps: config.mgMaxSteps,
     mgFactor: config.mgFactor,
@@ -2056,8 +2024,16 @@ function applyConfigToUI() {
   DOM.swInv.classList.toggle('active', config.invertTrade);
   if (DOM.swConfirm) DOM.swConfirm.classList.toggle('active', config.useConfirmation);
   if (DOM.swNext) DOM.swNext.classList.toggle('active', config.operateOnNext);
-  if (DOM.swEma) DOM.swEma.classList.toggle('active', config.useEmaFilter);
-  if (DOM.swRsi) DOM.swRsi.classList.toggle('active', config.useRsiFilter);
+  // Trend filter buttons
+  if (DOM.trendOff) {
+    const v = config.trendFilter || 'off';
+    DOM.trendOff.style.background = v === 'off' ? 'rgba(0,255,255,.15)' : 'transparent';
+    DOM.trendOff.style.color = v === 'off' ? '#0ff' : '#888';
+    DOM.trendBull.style.background = v === 'bullish' ? 'rgba(0,230,118,.2)' : 'transparent';
+    DOM.trendBull.style.color = v === 'bullish' ? '#00e676' : '#888';
+    DOM.trendBear.style.background = v === 'bearish' ? 'rgba(255,85,85,.2)' : 'transparent';
+    DOM.trendBear.style.color = v === 'bearish' ? '#ff5555' : '#888';
+  }
 
   // Inputs numéricos
   if (DOM.riskPct) DOM.riskPct.value = config.riskPct;
@@ -2596,7 +2572,7 @@ function checkThreeCandlePattern(curr, prev, prev2, trend) {
   return null;
 }
 
-// ============= DETECCIÓN DE SEÑALES - BREAKOUT + RUPTURA =============
+// ============= DETECCIÓN DE SEÑALES - FALSA RUPTURA PURA =============
 function detectSignal(liveCandle) {
   // Bloqueos operativos
   if (isStopPending) {
@@ -2623,79 +2599,33 @@ function detectSignal(liveCandle) {
 
   if (!isCandleClosed(prev, Date.now())) return null;
 
-  // === FILTRO DE CALIDAD DE MERCADO ===
-  if (isChoppyMarket(analysisCandles)) {
-    if (Math.random() < 0.02) logMonitor('⏸ Mercado choppy - esperando', 'info');
-    return null;
-  }
-  if (!isMinimumQuality(now, analysisCandles)) return null;
-
-  // === CALCULAR S/R, MOMENTUM E INDICADORES ===
+  // === CALCULAR S/R ===
   const { supports, resistances } = getLevels(analysisCandles, i);
-  const nearSupport = isNearLevel(now.l, supports);
-  const nearResistance = isNearLevel(now.h, resistances);
-  const momentumBullish = isStrongMomentum(analysisCandles, 'bullish');
-  const momentumBearish = isStrongMomentum(analysisCandles, 'bearish');
-
-  // Indicadores técnicos
-  const ind = getIndicators(analysisCandles);
-  const hasEMA = ind.emaFast !== null && ind.emaSlow !== null;
-  const emaUptrend = hasEMA && ind.emaFast > ind.emaSlow;
-  const emaDowntrend = hasEMA && ind.emaFast < ind.emaSlow;
-  const rsiOverbought = ind.rsi > 70;
-  const rsiOversold = ind.rsi < 30;
 
   // Log diagnóstico periódico
   if (Math.random() < 0.03) {
-    const sCount = supports.length;
-    const rCount = resistances.length;
-    const srInfo = nearSupport ? 'SOPORTE' : nearResistance ? 'RESISTENCIA' : 'ninguno';
-    const emaInfo = hasEMA ? (emaUptrend ? 'UP' : emaDowntrend ? 'DOWN' : 'FLAT') : 'N/A';
-    logMonitor(`📊 S:${sCount} R:${rCount} | ${srInfo} | EMA:${emaInfo} | RSI:${ind.rsi.toFixed(0)} | V:${analysisCandles.length}`, 'info');
+    const tFilter = config.trendFilter === 'off' ? 'OFF' : config.trendFilter === 'bullish' ? 'ALCISTA' : 'BAJISTA';
+    logMonitor(`📊 S:${supports.length} R:${resistances.length} | Tendencia: ${tFilter} | V:${analysisCandles.length}`, 'info');
   }
 
   let signal = null;
   let strategy = '';
-  let confluence = 0;
 
   // --- FALSA RUPTURA (rebote en S/R) ---
   if (supports.some(s => now.l < s && now.c > s && isRed(prev))) {
-    signal = 'call'; strategy = 'Falsa Ruptura Soporte'; confluence = 7;
+    signal = 'call'; strategy = 'Falsa Ruptura Soporte';
   } else if (resistances.some(r => now.h > r && now.c < r && isGreen(prev))) {
-    signal = 'put'; strategy = 'Falsa Ruptura Resistencia'; confluence = 7;
+    signal = 'put'; strategy = 'Falsa Ruptura Resistencia';
   }
 
-  // === FILTROS POST-SEÑAL (momentum, EMA, RSI) ===
-  if (signal) {
-    // Filtro momentum
-    if (signal === 'call' && momentumBearish) {
-      logMonitor(`⚠ CALL anulada: Momentum Bajista fuerte`, 'info');
+  // === FILTRO DE TENDENCIA (único filtro configurable) ===
+  if (signal && config.trendFilter !== 'off') {
+    if (config.trendFilter === 'bullish' && signal === 'put') {
+      logMonitor(`⚠ PUT bloqueada: Filtro tendencia ALCISTA`, 'info');
       signal = null;
-    } else if (signal === 'put' && momentumBullish) {
-      logMonitor(`⚠ PUT anulada: Momentum Alcista fuerte`, 'info');
+    } else if (config.trendFilter === 'bearish' && signal === 'call') {
+      logMonitor(`⚠ CALL bloqueada: Filtro tendencia BAJISTA`, 'info');
       signal = null;
-    }
-
-    // Filtro EMA (solo si está activado)
-    if (signal && config.useEmaFilter && hasEMA) {
-      if (signal === 'call' && emaDowntrend && !nearSupport) {
-        logMonitor(`⚠ CALL anulada: EMA bajista (sin soporte)`, 'info');
-        signal = null;
-      } else if (signal === 'put' && emaUptrend && !nearResistance) {
-        logMonitor(`⚠ PUT anulada: EMA alcista (sin resistencia)`, 'info');
-        signal = null;
-      }
-    }
-
-    // Filtro RSI (solo si está activado)
-    if (signal && config.useRsiFilter) {
-      if (signal === 'call' && rsiOverbought) {
-        logMonitor(`⚠ CALL anulada: RSI sobrecomprado (${ind.rsi.toFixed(0)})`, 'info');
-        signal = null;
-      } else if (signal === 'put' && rsiOversold) {
-        logMonitor(`⚠ PUT anulada: RSI sobrevendido (${ind.rsi.toFixed(0)})`, 'info');
-        signal = null;
-      }
     }
   }
 
@@ -2708,10 +2638,7 @@ function detectSignal(liveCandle) {
       note = ' (INV)';
     }
 
-    const trendTag = currentTrend !== 'neutral' ? ` [${currentTrend.toUpperCase()}]` : '';
-    const srTag = nearSupport || nearResistance ? ' [S/R]' : '';
-    logMonitor(`🚀 ${strategy} → ${displayType.toUpperCase()}${note}${trendTag}${srTag} [C:${confluence}]`, 'pattern');
-
+    logMonitor(`🚀 ${strategy} → ${displayType.toUpperCase()}${note}`, 'pattern');
     return { d: signal, strategy: strategy };
   }
   return null;
