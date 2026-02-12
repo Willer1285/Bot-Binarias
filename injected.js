@@ -2561,7 +2561,7 @@ function checkThreeCandlePattern(curr, prev, prev2, trend) {
   return null;
 }
 
-// ============= DETECCIÓN DE SEÑALES V16 - CONFLUENCIA S/R + CALIDAD =============
+// ============= DETECCIÓN DE SEÑALES - BREAKOUT + RUPTURA =============
 function detectSignal(liveCandle) {
   // Bloqueos operativos
   if (isStopPending) {
@@ -2585,7 +2585,6 @@ function detectSignal(liveCandle) {
   const i = analysisCandles.length - 1;
   const now = analysisCandles[i];
   const prev = analysisCandles[i - 1];
-  const prev2 = analysisCandles[i - 2];
 
   if (!isCandleClosed(prev, Date.now())) return null;
 
@@ -2603,15 +2602,15 @@ function detectSignal(liveCandle) {
   const momentumBullish = isStrongMomentum(analysisCandles, 'bullish');
   const momentumBearish = isStrongMomentum(analysisCandles, 'bearish');
 
-  // Indicadores técnicos (calculados instantáneamente desde velas)
+  // Indicadores técnicos
   const ind = getIndicators(analysisCandles);
   const hasEMA = ind.emaFast !== null && ind.emaSlow !== null;
-  const emaUptrend = hasEMA && ind.emaFast > ind.emaSlow;     // EMA8 > EMA21 = tendencia alcista
-  const emaDowntrend = hasEMA && ind.emaFast < ind.emaSlow;   // EMA8 < EMA21 = tendencia bajista
-  const rsiOverbought = ind.rsi > 70;   // Sobrecomprado
-  const rsiOversold = ind.rsi < 30;     // Sobrevendido
+  const emaUptrend = hasEMA && ind.emaFast > ind.emaSlow;
+  const emaDowntrend = hasEMA && ind.emaFast < ind.emaSlow;
+  const rsiOverbought = ind.rsi > 70;
+  const rsiOversold = ind.rsi < 30;
 
-  // Log diagnóstico (cada ~30 segundos)
+  // Log diagnóstico periódico
   if (Math.random() < 0.03) {
     const sCount = supports.length;
     const rCount = resistances.length;
@@ -2623,101 +2622,23 @@ function detectSignal(liveCandle) {
   let signal = null;
   let strategy = '';
   let confluence = 0;
+  const avgBody = getAvgBody(baseCandles);
 
-  // --- 1. PATRONES DE 3 VELAS (mayor prioridad) ---
-  const p3 = checkThreeCandlePattern(now, prev, prev2, currentTrend);
-  if (p3 && p3.type !== 'neutral') {
-    const conf = getSignalConfluence(p3, nearSupport, nearResistance, currentTrend, ind);
-    if (conf >= MIN_CONFLUENCE) {
-      signal = p3.type;
-      strategy = p3.name;
-      confluence = conf;
-    } else {
-      logMonitor(`⏭ ${p3.name} rechazada (C:${conf} < ${MIN_CONFLUENCE})`, 'info');
-    }
+  // --- 1. FALSA RUPTURA (rebote en S/R) ---
+  if (supports.some(s => now.l < s && now.c > s && isRed(prev))) {
+    signal = 'call'; strategy = 'Falsa Ruptura Soporte'; confluence = 7;
+  } else if (resistances.some(r => now.h > r && now.c < r && isGreen(prev))) {
+    signal = 'put'; strategy = 'Falsa Ruptura Resistencia'; confluence = 7;
   }
 
-  // --- 2. PATRONES DE 2 VELAS ---
+  // --- 2. BREAKOUT (ruptura de nivel con fuerza) ---
   if (!signal) {
-    const p2 = checkTwoCandlePattern(now, prev, currentTrend);
-    if (p2 && p2.type !== 'neutral') {
-      const conf = getSignalConfluence(p2, nearSupport, nearResistance, currentTrend, ind);
-      if (conf >= MIN_CONFLUENCE) {
-        signal = p2.type;
-        strategy = p2.name;
-        confluence = conf;
-      } else {
-        logMonitor(`⏭ ${p2.name} rechazada (C:${conf} < ${MIN_CONFLUENCE})`, 'info');
-      }
-    }
-  }
-
-  // --- 3. PATRONES DE 1 VELA (requieren S/R por naturaleza) ---
-  if (!signal) {
-    const p1 = checkSingleCandlePattern(now, currentTrend);
-    if (p1 && p1.type !== 'neutral') {
-      const conf = getSignalConfluence(p1, nearSupport, nearResistance, currentTrend, ind);
-      if (conf >= MIN_CONFLUENCE) {
-        signal = p1.type;
-        strategy = p1.name + ' (en Zona)';
-        confluence = conf;
-      }
-    }
-  }
-
-  // --- 4. FALSA RUPTURA (inherentemente en S/R) ---
-  if (!signal) {
-    if (supports.some(s => now.l < s && now.c > s && isRed(prev))) {
-      signal = 'call'; strategy = 'Falsa Ruptura Soporte'; confluence = 7;
-    } else if (resistances.some(r => now.h > r && now.c < r && isGreen(prev))) {
-      signal = 'put'; strategy = 'Falsa Ruptura Resistencia'; confluence = 7;
-    }
-  }
-
-  // === FILTRO DE MOMENTUM + INDICADORES ===
-  if (signal) {
-    // Filtro momentum por acción del precio
-    if (signal === 'call' && momentumBearish) {
-      logMonitor(`⚠ CALL anulada: Momentum Bajista fuerte`, 'info');
-      signal = null;
-    } else if (signal === 'put' && momentumBullish) {
-      logMonitor(`⚠ PUT anulada: Momentum Alcista fuerte`, 'info');
-      signal = null;
-    }
-
-    // Filtro EMA: No operar contra la tendencia de EMAs
-    if (signal && hasEMA) {
-      if (signal === 'call' && emaDowntrend && !nearSupport) {
-        logMonitor(`⚠ CALL anulada: EMA bajista (sin soporte)`, 'info');
-        signal = null;
-      } else if (signal === 'put' && emaUptrend && !nearResistance) {
-        logMonitor(`⚠ PUT anulada: EMA alcista (sin resistencia)`, 'info');
-        signal = null;
-      }
-    }
-
-    // Filtro RSI: No comprar sobrecomprado, no vender sobrevendido
-    if (signal) {
-      if (signal === 'call' && rsiOverbought) {
-        logMonitor(`⚠ CALL anulada: RSI sobrecomprado (${ind.rsi.toFixed(0)})`, 'info');
-        signal = null;
-      } else if (signal === 'put' && rsiOversold) {
-        logMonitor(`⚠ PUT anulada: RSI sobrevendido (${ind.rsi.toFixed(0)})`, 'info');
-        signal = null;
-      }
-    }
-  }
-
-  // --- 5. BREAKOUTS (señales de continuación, inherentemente en S/R) ---
-  if (!signal) {
-    const avgBody = getAvgBody(baseCandles);
-
     const brokenRes = resistances.find(r => prev.c <= r && now.c > r);
     if (brokenRes) {
       const bodySize = getBody(now);
       if (bodySize > avgBody * 1.2 && getUpperWick(now) < bodySize * 0.3) {
         signal = 'call';
-        strategy = 'Ruptura de Resistencia (Breakout)';
+        strategy = 'Ruptura de Resistencia';
         confluence = 7;
       }
     }
@@ -2728,9 +2649,43 @@ function detectSignal(liveCandle) {
         const bodySize = getBody(now);
         if (bodySize > avgBody * 1.2 && getLowerWick(now) < bodySize * 0.3) {
           signal = 'put';
-          strategy = 'Ruptura de Soporte (Breakout)';
+          strategy = 'Ruptura de Soporte';
           confluence = 7;
         }
+      }
+    }
+  }
+
+  // === FILTROS POST-SEÑAL (momentum, EMA, RSI) ===
+  if (signal) {
+    // Filtro momentum
+    if (signal === 'call' && momentumBearish) {
+      logMonitor(`⚠ CALL anulada: Momentum Bajista fuerte`, 'info');
+      signal = null;
+    } else if (signal === 'put' && momentumBullish) {
+      logMonitor(`⚠ PUT anulada: Momentum Alcista fuerte`, 'info');
+      signal = null;
+    }
+
+    // Filtro EMA
+    if (signal && hasEMA) {
+      if (signal === 'call' && emaDowntrend && !nearSupport) {
+        logMonitor(`⚠ CALL anulada: EMA bajista (sin soporte)`, 'info');
+        signal = null;
+      } else if (signal === 'put' && emaUptrend && !nearResistance) {
+        logMonitor(`⚠ PUT anulada: EMA alcista (sin resistencia)`, 'info');
+        signal = null;
+      }
+    }
+
+    // Filtro RSI
+    if (signal) {
+      if (signal === 'call' && rsiOverbought) {
+        logMonitor(`⚠ CALL anulada: RSI sobrecomprado (${ind.rsi.toFixed(0)})`, 'info');
+        signal = null;
+      } else if (signal === 'put' && rsiOversold) {
+        logMonitor(`⚠ PUT anulada: RSI sobrevendido (${ind.rsi.toFixed(0)})`, 'info');
+        signal = null;
       }
     }
   }
