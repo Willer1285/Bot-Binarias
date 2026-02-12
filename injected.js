@@ -2303,10 +2303,15 @@ function detectSignal(liveCandle) {
   // === CALCULAR S/R ===
   const { supports, resistances } = getLevels(analysisCandles, i);
 
-  // Log diagnóstico periódico
-  if (Math.random() < 0.03) {
-    const tFilter = config.trendFilter === 'off' ? 'OFF' : config.trendFilter === 'bullish' ? 'ALCISTA' : 'BAJISTA';
-    logMonitor(`📊 S:${supports.length} R:${resistances.length} | Tendencia: ${tFilter} | V:${analysisCandles.length}`, 'info');
+  // Log diagnóstico periódico mejorado (~1 cada 20 ticks)
+  if (Math.random() < 0.05) {
+    const prevDir = isRed(prev) ? 'ROJA' : isGreen(prev) ? 'VERDE' : 'DOJI';
+    const nearS = supports.length > 0 ? supports.reduce((a, b) => Math.abs(b - now.c) < Math.abs(a - now.c) ? b : a) : null;
+    const nearR = resistances.length > 0 ? resistances.reduce((a, b) => Math.abs(b - now.c) < Math.abs(a - now.c) ? b : a) : null;
+    const sInfo = nearS ? `${nearS.toFixed(2)}(${((now.c - nearS) / nearS * 100).toFixed(3)}%)` : '-';
+    const rInfo = nearR ? `${nearR.toFixed(2)}(${((nearR - now.c) / nearR * 100).toFixed(3)}%)` : '-';
+    logMonitor(`🔍 S:${supports.length} R:${resistances.length} | Prev:${prevDir} | L:${now.l.toFixed(2)} C:${now.c.toFixed(2)} H:${now.h.toFixed(2)}`, 'info');
+    logMonitor(`   NearS:${sInfo} NearR:${rInfo} | Velas:${analysisCandles.length}`, 'info');
   }
 
   let signal = null;
@@ -2348,7 +2353,24 @@ function detectSignal(liveCandle) {
 // ============= PROCESAMIENTO DE TICKS =============
 function onTick(data) {
   if (!isRunning) return;
-  
+
+  // FIX: Limpiar trades expirados (resultado no procesado por vela perdida/desconexión)
+  if (pendingTrades.length > 0) {
+    const cleanupTime = Date.now();
+    const prevLen = pendingTrades.length;
+    pendingTrades = pendingTrades.filter(t => {
+      // Si pasaron más de 2 minutos desde el inicio de la vela de resultado, está expirado
+      if (cleanupTime > t.k + 120000) {
+        logMonitor(`⚠ Trade expirado (${Math.round((cleanupTime - t.k) / 1000)}s sin resultado) - limpiando`, 'blocked');
+        return false;
+      }
+      return true;
+    });
+    if (pendingTrades.length < prevLen) {
+      logMonitor(`♻ ${prevLen - pendingTrades.length} trade(s) expirado(s) limpiado(s) - reanudando análisis`, 'info');
+    }
+  }
+
   updateConnectionUI(true);
   
   if (DOM.uiPrice) {
@@ -2479,7 +2501,7 @@ function onTick(data) {
           setTimeout(() => {
             executeTrade(mgType);
             const entryPrice = getCurrentPrice();
-            pendingTrades.push({ k: currentCandle.s, type: mgType, entryPrice: entryPrice });
+            pendingTrades.push({ k: currentCandle.s, type: mgType, entryPrice: entryPrice, ts: Date.now() });
             tradeExecutedThisCandle = true;
             lastTradeType = mgType;
           }, 500);
@@ -2495,8 +2517,12 @@ function onTick(data) {
     currentCandle.v = data.volume;
     
     if (!config.operateOnNext) {
-      const signal = detectSignal(currentCandle);
-      pendingSignal = signal || null;
+      // FIX: Signal locking - una vez detectada, no re-evaluar en cada tick
+      // Evita que la señal parpadee/desaparezca por oscilaciones de precio
+      if (!pendingSignal) {
+        const signal = detectSignal(currentCandle);
+        if (signal) pendingSignal = signal;
+      }
     }
   }
   
@@ -2549,7 +2575,8 @@ function updateSignalUI(sec, key) {
         const tKey = key + 60000;
         if (!pendingTrades.some(t => t.k === tKey)) {
           const entryPrice = getCurrentPrice();
-          pendingTrades.push({ k: tKey, type: type, entryPrice: entryPrice });
+          pendingTrades.push({ k: tKey, type: type, entryPrice: entryPrice, ts: Date.now() });
+          logMonitor(`📌 Trade registrado: ${type.toUpperCase()} @ ${entryPrice.toFixed(2)} (resultado en vela ${new Date(tKey).toLocaleTimeString()})`, 'success');
           if (config.autoTrade) executeTrade(type);
           else logMonitor(`Señal manual: ${type.toUpperCase()} @ ${entryPrice}`, 'success');
         }
