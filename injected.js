@@ -942,7 +942,9 @@ function checkWarmupStatus() {
   // Verificar S/R si hay suficientes velas
   if (!srReady && currentCandles >= MIN_CANDLES_FOR_SR) {
     const { supports, resistances } = getLevels(candles, currentCandles);
-    if (supports.length > 0 && resistances.length > 0) {
+    // Basta con detectar al menos 1 soporte O 1 resistencia
+    // (en mercados tendenciales puede que solo haya uno de los dos)
+    if (supports.length > 0 || resistances.length > 0) {
       srReady = true;
       logMonitor(`✓ S/R detectados: ${supports.length}S ${resistances.length}R - Sistema listo`, 'success');
     }
@@ -2303,24 +2305,36 @@ function detectSignal(liveCandle) {
   // === CALCULAR S/R ===
   const { supports, resistances } = getLevels(analysisCandles, i);
 
-  // Log diagnóstico periódico mejorado (~1 cada 20 ticks)
+  // --- TOLERANCIA DINÁMICA para falsa ruptura ---
+  // Precio no necesita perforar exactamente el nivel, basta con acercarse
+  const recentSlice = analysisCandles.slice(Math.max(0, i - 10), i);
+  const avgRange = recentSlice.length > 0
+    ? recentSlice.reduce((a, c) => a + (c.h - c.l), 0) / recentSlice.length
+    : 0;
+  const srTolerance = avgRange * 0.5;
+
+  // Log diagnóstico periódico (~1 cada 20 ticks, durante análisis en vivo)
   if (Math.random() < 0.05) {
     const prevDir = isRed(prev) ? 'ROJA' : isGreen(prev) ? 'VERDE' : 'DOJI';
     const nearS = supports.length > 0 ? supports.reduce((a, b) => Math.abs(b - now.c) < Math.abs(a - now.c) ? b : a) : null;
     const nearR = resistances.length > 0 ? resistances.reduce((a, b) => Math.abs(b - now.c) < Math.abs(a - now.c) ? b : a) : null;
-    const sInfo = nearS ? `${nearS.toFixed(2)}(${((now.c - nearS) / nearS * 100).toFixed(3)}%)` : '-';
-    const rInfo = nearR ? `${nearR.toFixed(2)}(${((nearR - now.c) / nearR * 100).toFixed(3)}%)` : '-';
+    const sDistAbs = nearS ? (now.c - nearS).toFixed(2) : '-';
+    const rDistAbs = nearR ? (nearR - now.c).toFixed(2) : '-';
     logMonitor(`🔍 S:${supports.length} R:${resistances.length} | Prev:${prevDir} | L:${now.l.toFixed(2)} C:${now.c.toFixed(2)} H:${now.h.toFixed(2)}`, 'info');
-    logMonitor(`   NearS:${sInfo} NearR:${rInfo} | Velas:${analysisCandles.length}`, 'info');
+    logMonitor(`   S~dist:${sDistAbs} R~dist:${rDistAbs} | Tol:${srTolerance.toFixed(2)}`, 'info');
   }
 
   let signal = null;
   let strategy = '';
 
-  // --- FALSA RUPTURA (rebote en S/R) ---
-  if (supports.some(s => now.l < s && now.c > s && isRed(prev))) {
+  // CALL: precio se acercó/perforó soporte y está rebotando arriba
+  // !isGreen(prev) = vela previa roja O doji (mercado venía cayendo o lateral)
+  if (supports.some(s => now.l <= s + srTolerance && now.c > s && !isGreen(prev))) {
     signal = 'call'; strategy = 'Falsa Ruptura Soporte';
-  } else if (resistances.some(r => now.h > r && now.c < r && isGreen(prev))) {
+  }
+  // PUT: precio se acercó/perforó resistencia y está siendo rechazado abajo
+  // !isRed(prev) = vela previa verde O doji (mercado venía subiendo o lateral)
+  else if (resistances.some(r => now.h >= r - srTolerance && now.c < r && !isRed(prev))) {
     signal = 'put'; strategy = 'Falsa Ruptura Resistencia';
   }
 
@@ -2437,9 +2451,24 @@ function onTick(data) {
     }
     candles.push({ ...currentCandle });
     if (candles.length > MAX_CANDLES) candles.shift();
-    
+
     processed++;
-    
+
+    // Diagnóstico FORZADO en cada cierre de vela (siempre visible)
+    if (isSystemWarmedUp && candles.length >= 5) {
+      const diagIdx = candles.length - 1;
+      const diagLevels = getLevels(candles, candles.length);
+      const lastC = candles[diagIdx];
+      const prevC = candles[diagIdx - 1];
+      const nearS = diagLevels.supports.length > 0 ? diagLevels.supports.reduce((a, b) => Math.abs(b - lastC.c) < Math.abs(a - lastC.c) ? b : a) : null;
+      const nearR = diagLevels.resistances.length > 0 ? diagLevels.resistances.reduce((a, b) => Math.abs(b - lastC.c) < Math.abs(a - lastC.c) ? b : a) : null;
+      const prevDir = isRed(prevC) ? 'ROJA' : isGreen(prevC) ? 'VERDE' : 'DOJI';
+      const sDistPct = nearS ? ((lastC.c - nearS) / nearS * 100).toFixed(3) : '-';
+      const rDistPct = nearR ? ((nearR - lastC.c) / nearR * 100).toFixed(3) : '-';
+      logMonitor(`📊 Vela #${processed} | S:${diagLevels.supports.length} R:${diagLevels.resistances.length} | Prev:${prevDir} | C:${lastC.c.toFixed(2)}`, 'info');
+      logMonitor(`   S~${nearS ? nearS.toFixed(2) : '-'}(${sDistPct}%) R~${nearR ? nearR.toFixed(2) : '-'}(${rDistPct}%) | PT:${pendingTrades.length} MG:${activeMartingaleTrade ? 'SI' : 'NO'}`, 'info');
+    }
+
     updateTrend(); // Actualizar tendencia con cada vela cerrada
     checkTradeResults(currentCandle);
     checkSafeStop(); // Verificar si podemos parar después de cerrar vela y procesar resultados
