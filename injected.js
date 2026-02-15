@@ -2305,34 +2305,50 @@ function detectSignal() {
   const { supports, resistances } = getLevels(analysisCandles, i);
 
   // --- TOLERANCIA DINÁMICA para falsa ruptura ---
-  // Precio no necesita perforar exactamente el nivel, basta con acercarse
   const recentSlice = analysisCandles.slice(Math.max(0, i - 10), i);
   const avgRange = recentSlice.length > 0
     ? recentSlice.reduce((a, c) => a + (c.h - c.l), 0) / recentSlice.length
     : 0;
-  const srTolerance = avgRange * 0.5;
+  const srTolerance = avgRange * 0.3; // 30% del rango promedio (más preciso)
 
   // Log diagnóstico (se llama 1 vez por vela cerrada)
   const prevDir = isRed(prev) ? 'ROJA' : isGreen(prev) ? 'VERDE' : 'DOJI';
+  const nowDir = isGreen(now) ? 'VERDE' : isRed(now) ? 'ROJA' : 'DOJI';
   const nearS = supports.length > 0 ? supports.reduce((a, b) => Math.abs(b - now.c) < Math.abs(a - now.c) ? b : a) : null;
   const nearR = resistances.length > 0 ? resistances.reduce((a, b) => Math.abs(b - now.c) < Math.abs(a - now.c) ? b : a) : null;
   const sDistAbs = nearS ? (now.c - nearS).toFixed(2) : '-';
   const rDistAbs = nearR ? (nearR - now.c).toFixed(2) : '-';
-  logMonitor(`🔍 S:${supports.length} R:${resistances.length} | Prev:${prevDir} | L:${now.l.toFixed(2)} C:${now.c.toFixed(2)} H:${now.h.toFixed(2)}`, 'info');
-  logMonitor(`   S~dist:${sDistAbs} R~dist:${rDistAbs} | Tol:${srTolerance.toFixed(2)}`, 'info');
+  logMonitor(`🔍 S:${supports.length} R:${resistances.length} | Prev:${prevDir} Now:${nowDir} | L:${now.l.toFixed(2)} C:${now.c.toFixed(2)} H:${now.h.toFixed(2)}`, 'info');
+  logMonitor(`   S~dist:${sDistAbs} R~dist:${rDistAbs} | Tol:${srTolerance.toFixed(2)} | Trend:${currentTrend.toUpperCase()}`, 'info');
 
   let signal = null;
   let strategy = '';
 
-  // CALL: precio se acercó/perforó soporte y está rebotando arriba
-  // !isGreen(prev) = vela previa roja O doji (mercado venía cayendo o lateral)
-  if (supports.some(s => now.l <= s + srTolerance && now.c > s && !isGreen(prev))) {
-    signal = 'call'; strategy = 'Falsa Ruptura Soporte';
+  // === FALSA RUPTURA CON CONFIRMACIÓN ===
+  // Requiere:
+  // 1. Precio se acercó/perforó nivel S/R (con tolerancia)
+  // 2. Precio CERRÓ al lado correcto del nivel
+  // 3. Vela previa en dirección de aproximación (no contra)
+  // 4. Vela actual muestra RECHAZO (cuerpo en dirección opuesta a la aproximación)
+  // 5. Alineación con tendencia automática (no operar contra-tendencia)
+
+  // CALL en soporte: rebote alcista confirmado
+  if (supports.some(s => now.l <= s + srTolerance && now.c > s && !isGreen(prev) && isGreen(now))) {
+    // Bloquear si tendencia es bajista (soporte poco confiable en caída)
+    if (currentTrend === 'bearish') {
+      logMonitor(`⚠ CALL bloqueada: tendencia BAJISTA (soporte poco confiable)`, 'info');
+    } else {
+      signal = 'call'; strategy = 'Falsa Ruptura Soporte';
+    }
   }
-  // PUT: precio se acercó/perforó resistencia y está siendo rechazado abajo
-  // !isRed(prev) = vela previa verde O doji (mercado venía subiendo o lateral)
-  else if (resistances.some(r => now.h >= r - srTolerance && now.c < r && !isRed(prev))) {
-    signal = 'put'; strategy = 'Falsa Ruptura Resistencia';
+  // PUT en resistencia: rechazo bajista confirmado
+  else if (resistances.some(r => now.h >= r - srTolerance && now.c < r && !isRed(prev) && isRed(now))) {
+    // Bloquear si tendencia es alcista (resistencia poco confiable en subida)
+    if (currentTrend === 'bullish') {
+      logMonitor(`⚠ PUT bloqueada: tendencia ALCISTA (resistencia poco confiable)`, 'info');
+    } else {
+      signal = 'put'; strategy = 'Falsa Ruptura Resistencia';
+    }
   }
 
   // === FILTRO DE TENDENCIA (único filtro configurable) ===
