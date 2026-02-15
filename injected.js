@@ -2276,7 +2276,7 @@ function checkThreeCandlePattern(curr, prev, prev2, trend) {
 }
 
 // ============= DETECCIÓN DE SEÑALES - FALSA RUPTURA PURA =============
-function detectSignal(liveCandle) {
+function detectSignal() {
   // Bloqueos operativos
   if (isStopPending) {
     if (Math.random() < 0.05) logMonitor('🚫 Señales bloqueadas: Stop Pendiente', 'info');
@@ -2291,9 +2291,8 @@ function detectSignal(liveCandle) {
   checkWarmupStatus();
   if (!isSystemWarmedUp) return null;
 
-  const baseCandles = getAnalysisCandles();
-  const analysisCandles = [...baseCandles];
-  if (liveCandle && !config.operateOnNext) analysisCandles.push(liveCandle);
+  // Solo analizar velas CERRADAS - el cierre confirma el patrón
+  const analysisCandles = getAnalysisCandles();
   if (analysisCandles.length < 5) return null;
 
   const i = analysisCandles.length - 1;
@@ -2313,16 +2312,14 @@ function detectSignal(liveCandle) {
     : 0;
   const srTolerance = avgRange * 0.5;
 
-  // Log diagnóstico periódico (~1 cada 20 ticks, durante análisis en vivo)
-  if (Math.random() < 0.05) {
-    const prevDir = isRed(prev) ? 'ROJA' : isGreen(prev) ? 'VERDE' : 'DOJI';
-    const nearS = supports.length > 0 ? supports.reduce((a, b) => Math.abs(b - now.c) < Math.abs(a - now.c) ? b : a) : null;
-    const nearR = resistances.length > 0 ? resistances.reduce((a, b) => Math.abs(b - now.c) < Math.abs(a - now.c) ? b : a) : null;
-    const sDistAbs = nearS ? (now.c - nearS).toFixed(2) : '-';
-    const rDistAbs = nearR ? (nearR - now.c).toFixed(2) : '-';
-    logMonitor(`🔍 S:${supports.length} R:${resistances.length} | Prev:${prevDir} | L:${now.l.toFixed(2)} C:${now.c.toFixed(2)} H:${now.h.toFixed(2)}`, 'info');
-    logMonitor(`   S~dist:${sDistAbs} R~dist:${rDistAbs} | Tol:${srTolerance.toFixed(2)}`, 'info');
-  }
+  // Log diagnóstico (se llama 1 vez por vela cerrada)
+  const prevDir = isRed(prev) ? 'ROJA' : isGreen(prev) ? 'VERDE' : 'DOJI';
+  const nearS = supports.length > 0 ? supports.reduce((a, b) => Math.abs(b - now.c) < Math.abs(a - now.c) ? b : a) : null;
+  const nearR = resistances.length > 0 ? resistances.reduce((a, b) => Math.abs(b - now.c) < Math.abs(a - now.c) ? b : a) : null;
+  const sDistAbs = nearS ? (now.c - nearS).toFixed(2) : '-';
+  const rDistAbs = nearR ? (nearR - now.c).toFixed(2) : '-';
+  logMonitor(`🔍 S:${supports.length} R:${resistances.length} | Prev:${prevDir} | L:${now.l.toFixed(2)} C:${now.c.toFixed(2)} H:${now.h.toFixed(2)}`, 'info');
+  logMonitor(`   S~dist:${sDistAbs} R~dist:${rDistAbs} | Tol:${srTolerance.toFixed(2)}`, 'info');
 
   let signal = null;
   let strategy = '';
@@ -2454,31 +2451,11 @@ function onTick(data) {
 
     processed++;
 
-    // Diagnóstico FORZADO en cada cierre de vela (siempre visible)
-    if (isSystemWarmedUp && candles.length >= 5) {
-      const diagIdx = candles.length - 1;
-      const diagLevels = getLevels(candles, candles.length);
-      const lastC = candles[diagIdx];
-      const prevC = candles[diagIdx - 1];
-      const nearS = diagLevels.supports.length > 0 ? diagLevels.supports.reduce((a, b) => Math.abs(b - lastC.c) < Math.abs(a - lastC.c) ? b : a) : null;
-      const nearR = diagLevels.resistances.length > 0 ? diagLevels.resistances.reduce((a, b) => Math.abs(b - lastC.c) < Math.abs(a - lastC.c) ? b : a) : null;
-      const prevDir = isRed(prevC) ? 'ROJA' : isGreen(prevC) ? 'VERDE' : 'DOJI';
-      const sDistPct = nearS ? ((lastC.c - nearS) / nearS * 100).toFixed(3) : '-';
-      const rDistPct = nearR ? ((nearR - lastC.c) / nearR * 100).toFixed(3) : '-';
-      logMonitor(`📊 Vela #${processed} | S:${diagLevels.supports.length} R:${diagLevels.resistances.length} | Prev:${prevDir} | C:${lastC.c.toFixed(2)}`, 'info');
-      logMonitor(`   S~${nearS ? nearS.toFixed(2) : '-'}(${sDistPct}%) R~${nearR ? nearR.toFixed(2) : '-'}(${rDistPct}%) | PT:${pendingTrades.length} MG:${activeMartingaleTrade ? 'SI' : 'NO'}`, 'info');
-    }
-
     updateTrend(); // Actualizar tendencia con cada vela cerrada
     checkTradeResults(currentCandle);
     checkSafeStop(); // Verificar si podemos parar después de cerrar vela y procesar resultados
     
-    if (config.operateOnNext) {
-      pendingSignal = detectSignal();
-    } else {
-      pendingSignal = null;
-    }
-    
+    pendingSignal = null;
     tradeExecutedThisCandle = false;
     lastTradeType = null;
     
@@ -2539,20 +2516,37 @@ function onTick(data) {
         }
       }
     }
+
+    // === DETECCIÓN EN VELA CERRADA + EJECUCIÓN INMEDIATA ===
+    // Solo si no hay martingala activa ni trade ya ejecutado
+    if (!activeMartingaleTrade && !tradeExecutedThisCandle) {
+      const signal = detectSignal();
+      if (signal) {
+        pendingSignal = signal;
+        let type = signal.d;
+        if (config.invertTrade) type = type === 'call' ? 'put' : 'call';
+        tradeExecutedThisCandle = true;
+        lastTradeType = type;
+        logMonitor(`🎯 Señal confirmada por cierre: ${signal.strategy} → ${type.toUpperCase()}`, 'pattern');
+        // Ejecutar con pequeño delay para que la nueva vela se estabilice
+        setTimeout(() => {
+          const tKey = currentCandle.s;
+          if (!pendingTrades.some(t => t.k === tKey)) {
+            const entryPrice = getCurrentPrice();
+            pendingTrades.push({ k: tKey, type: type, entryPrice: entryPrice, ts: Date.now() });
+            logMonitor(`📌 Trade: ${type.toUpperCase()} @ ${entryPrice.toFixed(2)}`, 'success');
+            if (config.autoTrade) executeTrade(type);
+            else logMonitor(`Señal manual: ${type.toUpperCase()} @ ${entryPrice}`, 'success');
+          }
+        }, 500);
+      }
+    }
   } else {
+    // Tick durante vela en formación - solo actualizar OHLCV
     currentCandle.c = data.closePrice;
     currentCandle.h = Math.max(currentCandle.h, data.closePrice);
     currentCandle.l = Math.min(currentCandle.l, data.closePrice);
     currentCandle.v = data.volume;
-    
-    if (!config.operateOnNext) {
-      // FIX: Signal locking - una vez detectada, no re-evaluar en cada tick
-      // Evita que la señal parpadee/desaparezca por oscilaciones de precio
-      if (!pendingSignal) {
-        const signal = detectSignal(currentCandle);
-        if (signal) pendingSignal = signal;
-      }
-    }
   }
   
   const now = Date.now() + config.timeOffset;
@@ -2584,41 +2578,14 @@ function updateSignalUI(sec, key) {
   }
 
   if (pendingSignal) {
+    // Señal detectada en vela cerrada - trade ya ejecutado/ejecutándose
     let type = pendingSignal.d;
     if (config.invertTrade) type = type === 'call' ? 'put' : 'call';
-
     const isCall = type === 'call';
-    const triggerSec = 60 - config.entrySec;
-    const windowSize = config.entryWindowSec || 3;
-
-    if (sec <= triggerSec && sec > (triggerSec - windowSize)) {
-      DOM.signalBox.className = isCall ? 'sig-entry-call' : 'sig-entry-put';
-      DOM.signalStatus.innerHTML = `
-        <div class="signal-title" style="color:${isCall ? '#00ff88' : '#ff0080'};font-size:16px">${isCall ? '▲▲ COMPRA ▲▲' : '▼▼ VENTA ▼▼'}</div>
-        <div class="entry-countdown" style="color:${isCall ? '#00ff88' : '#ff0080'}">¡¡ ENTRAR AHORA !!</div>
-        <div style="font-size:9px;margin-top:4px;color:#fff">${currentTrend.toUpperCase()}</div>`;
-
-      if (!tradeExecutedThisCandle) {
-        tradeExecutedThisCandle = true;
-        lastTradeType = type;
-        const tKey = key + 60000;
-        if (!pendingTrades.some(t => t.k === tKey)) {
-          const entryPrice = getCurrentPrice();
-          pendingTrades.push({ k: tKey, type: type, entryPrice: entryPrice, ts: Date.now() });
-          logMonitor(`📌 Trade registrado: ${type.toUpperCase()} @ ${entryPrice.toFixed(2)} (resultado en vela ${new Date(tKey).toLocaleTimeString()})`, 'success');
-          if (config.autoTrade) executeTrade(type);
-          else logMonitor(`Señal manual: ${type.toUpperCase()} @ ${entryPrice}`, 'success');
-        }
-      }
-    } else {
-      DOM.signalBox.className = 'sig-anticipation';
-      DOM.signalStatus.innerHTML = `
-        <div class="anticipation-badge" style="color:${isCall ? '#00ff88' : '#ff0080'};padding:4px 10px">
-          PREPARAR ${isCall ? '▲ CALL' : '▼ PUT'}
-        </div>
-        <div style="font-size:11px;margin-top:6px;color:#fff">Entrada: <span style="color:#ffff00;font-weight:700">${sec}s</span></div>
-        <div style="font-size:9px;margin-top:2px;color:#aaa">ESPERANDO OPORTUNIDAD</div>`;
-    }
+    DOM.signalBox.className = isCall ? 'sig-entry-call' : 'sig-entry-put';
+    DOM.signalStatus.innerHTML = `
+      <div class="signal-title" style="color:${isCall ? '#00ff88' : '#ff0080'};font-size:16px">${isCall ? '▲▲ COMPRA ▲▲' : '▼▼ VENTA ▼▼'}</div>
+      <div class="signal-subtitle" style="color:#fff;font-size:10px">${pendingSignal.strategy}</div>`;
   } else {
     // Si hay parada pendiente, mostrar en UI
     if (isStopPending) {
