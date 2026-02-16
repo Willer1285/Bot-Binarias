@@ -8,8 +8,8 @@ console.log('%c WORBIT SNIPER V15.0 LOADING...', 'background: #00e676; color: #0
 const VERSION = '15.0';
 const TARGET_CANDLES = 2;
 const TARGET_CANDLES_FULL = 3;
-const MIN_CANDLES_FOR_SR = 7;    // Mínimo de velas para detectar S/R (pivotes necesitan 2+2 a cada lado)
-const WARMUP_EFFECTIVE_TARGET = 10; // Velas reales estimadas para que el sistema esté listo (S/R + indicadores)
+const MIN_CANDLES_FOR_VOLUME = 5;   // Mínimo de velas para calcular promedios de volumen
+const WARMUP_EFFECTIVE_TARGET = 5;  // Velas reales para que el sistema esté listo
 const MAX_CANDLES = 200;
 const MAX_LOGS = 50; // Aumentado para ver más historial
 const HEALTH_CHECK_INTERVAL = 3000;
@@ -368,6 +368,14 @@ let lastWsData = null;
 let lastTradeTime = 0;             // Timestamp del último trade ejecutado
 let consecutiveLosses = 0;         // Contador de pérdidas consecutivas
 
+// ============= TICK VOLUME TRACKER =============
+let tickTracker = {
+  count: 0,          // Total ticks en la vela actual
+  upTicks: 0,        // Ticks donde precio subió
+  downTicks: 0,      // Ticks donde precio bajó
+  lastPrice: 0       // Precio del tick anterior
+};
+
 // ============= SISTEMA DE WARMUP =============
 let systemWarmupLevel = 0;         // 0-100% de preparación
 let isSystemWarmedUp = false;      // True cuando está al 100%
@@ -589,7 +597,8 @@ function updateWarmupUI() {
     if (isSystemWarmedUp) {
       DOM.warmupText.textContent = 'Listo';
     } else {
-      DOM.warmupText.textContent = 'Cargando datos...';
+      const withTicks = candles.filter(c => c.ticks && c.ticks > 0).length;
+      DOM.warmupText.textContent = `Calibrando volumen (${withTicks}/${MIN_CANDLES_FOR_VOLUME})`;
     }
   }
 
@@ -939,6 +948,7 @@ function startBot() {
   pendingSignal = null;
   pendingTrades = [];
   consecutiveLosses = 0;
+  tickTracker = { count: 0, upTicks: 0, downTicks: 0, lastPrice: 0 };
 
   setupWebSocketInterceptor();
 
@@ -995,29 +1005,19 @@ function checkWarmupStatus() {
     return false;
   }
 
-  // Verificar S/R si hay suficientes velas
-  if (!srReady && currentCandles >= MIN_CANDLES_FOR_SR) {
-    const { supports, resistances } = getLevels(candles, currentCandles);
-    // Basta con detectar al menos 1 soporte O 1 resistencia
-    // (en mercados tendenciales puede que solo haya uno de los dos)
-    if (supports.length > 0 || resistances.length > 0) {
-      srReady = true;
-      logMonitor(`✓ S/R detectados: ${supports.length}S ${resistances.length}R - Sistema listo`, 'success');
-    }
-  }
+  // Sistema de volumen: solo necesita suficientes velas con datos de ticks
+  const candlesWithTicks = candles.filter(c => c.ticks && c.ticks > 0).length;
 
-  if (srReady) {
-    // S/R detectados = sistema 100% listo
+  if (candlesWithTicks >= MIN_CANDLES_FOR_VOLUME) {
     systemWarmupLevel = 100;
     isSystemWarmedUp = true;
+    if (!srReady) {
+      srReady = true;
+      logMonitor(`✓ ${candlesWithTicks} velas con datos de volumen - Sistema listo`, 'success');
+    }
   } else {
-    // Progreso gradual: 0-90% basado en velas acumuladas, 100% solo con S/R
-    const candleProgress = Math.min(90, Math.floor((currentCandles / WARMUP_EFFECTIVE_TARGET) * 90));
-    // Después de MIN_CANDLES_FOR_SR, agregar progreso lento extra por cada vela adicional
-    const extraProgress = currentCandles > MIN_CANDLES_FOR_SR
-      ? Math.min(9, (currentCandles - MIN_CANDLES_FOR_SR) * 3)
-      : 0;
-    systemWarmupLevel = Math.min(99, candleProgress + extraProgress);
+    // Progreso basado en velas acumuladas con ticks
+    systemWarmupLevel = Math.min(99, Math.floor((candlesWithTicks / MIN_CANDLES_FOR_VOLUME) * 100));
     isSystemWarmedUp = false;
   }
 
@@ -2362,7 +2362,8 @@ function checkThreeCandlePattern(curr, prev, prev2, trend) {
   return null;
 }
 
-// ============= DETECCIÓN DE SEÑALES - FALSA RUPTURA PURA =============
+// ============= DETECCIÓN DE SEÑALES - SISTEMA HÍBRIDO DE VOLUMEN =============
+// Triple confirmación: Tick Volume + Momentum + Delta
 function detectSignal() {
   // Bloqueos operativos
   if (isStopPending) {
@@ -2378,79 +2379,94 @@ function detectSignal() {
   checkWarmupStatus();
   if (!isSystemWarmedUp) return null;
 
-  // Solo analizar velas CERRADAS - el cierre confirma el patrón
+  // Solo analizar velas CERRADAS
   const analysisCandles = getAnalysisCandles();
-  if (analysisCandles.length < 5) return null;
+  if (analysisCandles.length < MIN_CANDLES_FOR_VOLUME) return null;
 
   const i = analysisCandles.length - 1;
   const now = analysisCandles[i];
-  const prev = analysisCandles[i - 1];
 
-  if (!isCandleClosed(prev, Date.now())) return null;
+  // Necesita datos de ticks válidos
+  if (!now.ticks || now.ticks < 10) {
+    logMonitor(`📊 Vela con pocos ticks (${now.ticks || 0}) - insuficiente para análisis`, 'info');
+    return null;
+  }
 
-  // === CALCULAR S/R ===
-  const { supports, resistances } = getLevels(analysisCandles, i);
+  // === CALCULAR PROMEDIOS DE REFERENCIA (últimas 20 velas) ===
+  const lookback = Math.min(20, i);
+  const recent = analysisCandles.slice(i - lookback, i);
 
-  // --- TOLERANCIA DINÁMICA para falsa ruptura ---
-  const recentSlice = analysisCandles.slice(Math.max(0, i - 10), i);
-  const avgRange = recentSlice.length > 0
-    ? recentSlice.reduce((a, c) => a + (c.h - c.l), 0) / recentSlice.length
+  // Solo velas que tengan datos de ticks
+  const withTicks = recent.filter(c => c.ticks && c.ticks > 0);
+  if (withTicks.length < 3) return null;
+
+  // 1. Promedio de ticks por vela
+  const avgTicks = withTicks.reduce((a, c) => a + c.ticks, 0) / withTicks.length;
+
+  // 2. Promedio de body (tamaño del cuerpo)
+  const avgBody = recent.reduce((a, c) => a + Math.abs(c.c - c.o), 0) / recent.length;
+
+  // === MÉTRICAS DE LA VELA ACTUAL ===
+  const body = Math.abs(now.c - now.o);
+  const totalDirectional = now.deltaUp + now.deltaDown;
+  const dominantUp = now.deltaUp > now.deltaDown;
+  const deltaRatio = totalDirectional > 0
+    ? Math.max(now.deltaUp, now.deltaDown) / totalDirectional
     : 0;
-  const srTolerance = avgRange * 0.3; // 30% del rango promedio (más preciso)
 
-  // Log diagnóstico (se llama 1 vez por vela cerrada)
-  const prevDir = isRed(prev) ? 'ROJA' : isGreen(prev) ? 'VERDE' : 'DOJI';
-  const nowDir = isGreen(now) ? 'VERDE' : isRed(now) ? 'ROJA' : 'DOJI';
-  const nearS = supports.length > 0 ? supports.reduce((a, b) => Math.abs(b - now.c) < Math.abs(a - now.c) ? b : a) : null;
-  const nearR = resistances.length > 0 ? resistances.reduce((a, b) => Math.abs(b - now.c) < Math.abs(a - now.c) ? b : a) : null;
-  const sDistAbs = nearS ? (now.c - nearS).toFixed(2) : '-';
-  const rDistAbs = nearR ? (nearR - now.c).toFixed(2) : '-';
-  logMonitor(`🔍 S:${supports.length} R:${resistances.length} | Prev:${prevDir} Now:${nowDir} | L:${now.l.toFixed(2)} C:${now.c.toFixed(2)} H:${now.h.toFixed(2)}`, 'info');
-  logMonitor(`   S~dist:${sDistAbs} R~dist:${rDistAbs} | Tol:${srTolerance.toFixed(2)} | Trend:${currentTrend.toUpperCase()}`, 'info');
+  // === TRES FILTROS ===
+  const tickRatio = avgTicks > 0 ? now.ticks / avgTicks : 0;
+  const bodyRatio = avgBody > 0 ? body / avgBody : 0;
 
-  let signal = null;
-  let strategy = '';
+  const TICK_VOLUME_MULT = 1.5;   // Ticks >= 1.5x promedio
+  const MOMENTUM_MULT = 1.8;      // Body >= 1.8x promedio
+  const DELTA_THRESHOLD = 0.62;   // >= 62% ticks en una dirección
 
-  // === FALSA RUPTURA CON CONFIRMACIÓN ===
-  // Requiere:
-  // 1. Precio se acercó/perforó nivel S/R (con tolerancia)
-  // 2. Precio CERRÓ al lado correcto del nivel
-  // 3. Vela previa en dirección de aproximación (no contra)
-  // 4. Vela actual muestra RECHAZO (cuerpo en dirección opuesta a la aproximación)
-  // 5. Alineación con tendencia automática (no operar contra-tendencia)
+  const tickVolumeHigh = tickRatio >= TICK_VOLUME_MULT;
+  const momentumStrong = bodyRatio >= MOMENTUM_MULT;
+  const deltaExtreme = deltaRatio >= DELTA_THRESHOLD;
 
-  // CALL en soporte: rebote alcista confirmado
-  if (supports.some(s => now.l <= s + srTolerance && now.c > s && !isGreen(prev) && isGreen(now))) {
-    // Bloquear si tendencia es bajista (soporte poco confiable en caída)
-    if (currentTrend === 'bearish') {
-      logMonitor(`⚠ CALL bloqueada: tendencia BAJISTA (soporte poco confiable)`, 'info');
-    } else {
-      signal = 'call'; strategy = 'Falsa Ruptura Soporte';
+  // Dirección dominante
+  const direction = dominantUp ? 'call' : 'put';
+
+  // Confirmación: el color de la vela debe coincidir con la dirección del delta
+  const candleConfirms = (direction === 'call' && isGreen(now)) ||
+                         (direction === 'put' && isRed(now));
+
+  // === LOG DIAGNÓSTICO (1 vez por vela cerrada) ===
+  const volIcon = tickVolumeHigh ? '✓' : '✗';
+  const momIcon = momentumStrong ? '✓' : '✗';
+  const delIcon = deltaExtreme ? '✓' : '✗';
+  const colIcon = candleConfirms ? '✓' : '✗';
+  logMonitor(`📊 ${now.ticks}t (avg:${avgTicks.toFixed(0)} x${tickRatio.toFixed(1)}) | Body:${body.toFixed(2)} (avg:${avgBody.toFixed(2)} x${bodyRatio.toFixed(1)}) | Delta:${(deltaRatio*100).toFixed(0)}%${dominantUp ? '↑' : '↓'} | ${volIcon}Vol ${momIcon}Mom ${delIcon}Del ${colIcon}Col`, 'info');
+
+  // === SEÑAL: todas las condiciones deben cumplirse ===
+  if (tickVolumeHigh && momentumStrong && deltaExtreme && candleConfirms) {
+    let signal = direction;
+    let strategy = `Volumen ${signal === 'call' ? 'Alcista' : 'Bajista'}`;
+
+    // Filtro de tendencia automático
+    if (currentTrend === 'bearish' && signal === 'call') {
+      logMonitor(`⚠ CALL bloqueada: tendencia BAJISTA`, 'info');
+      return null;
     }
-  }
-  // PUT en resistencia: rechazo bajista confirmado
-  else if (resistances.some(r => now.h >= r - srTolerance && now.c < r && !isRed(prev) && isRed(now))) {
-    // Bloquear si tendencia es alcista (resistencia poco confiable en subida)
-    if (currentTrend === 'bullish') {
-      logMonitor(`⚠ PUT bloqueada: tendencia ALCISTA (resistencia poco confiable)`, 'info');
-    } else {
-      signal = 'put'; strategy = 'Falsa Ruptura Resistencia';
+    if (currentTrend === 'bullish' && signal === 'put') {
+      logMonitor(`⚠ PUT bloqueada: tendencia ALCISTA`, 'info');
+      return null;
     }
-  }
 
-  // === FILTRO DE TENDENCIA (único filtro configurable) ===
-  if (signal && config.trendFilter !== 'off') {
-    if (config.trendFilter === 'bullish' && signal === 'put') {
-      logMonitor(`⚠ PUT bloqueada: Filtro tendencia ALCISTA`, 'info');
-      signal = null;
-    } else if (config.trendFilter === 'bearish' && signal === 'call') {
-      logMonitor(`⚠ CALL bloqueada: Filtro tendencia BAJISTA`, 'info');
-      signal = null;
+    // Filtro de tendencia manual
+    if (config.trendFilter !== 'off') {
+      if (config.trendFilter === 'bullish' && signal === 'put') {
+        logMonitor(`⚠ PUT bloqueada: Filtro tendencia ALCISTA`, 'info');
+        return null;
+      }
+      if (config.trendFilter === 'bearish' && signal === 'call') {
+        logMonitor(`⚠ CALL bloqueada: Filtro tendencia BAJISTA`, 'info');
+        return null;
+      }
     }
-  }
 
-  // === SEÑAL FINAL ===
-  if (signal) {
     let displayType = signal;
     let note = '';
     if (config.invertTrade) {
@@ -2458,9 +2474,10 @@ function detectSignal() {
       note = ' (INV)';
     }
 
-    logMonitor(`🚀 ${strategy} → ${displayType.toUpperCase()}${note}`, 'pattern');
+    logMonitor(`🚀 ${strategy} → ${displayType.toUpperCase()}${note} | ${now.ticks}t | Delta:${(deltaRatio*100).toFixed(0)}% | Mom:x${bodyRatio.toFixed(1)}`, 'pattern');
     return { d: signal, strategy: strategy };
   }
+
   return null;
 }
 
@@ -2546,9 +2563,15 @@ function onTick(data) {
         s: candleTime, o: data.closePrice, h: data.closePrice,
         l: data.closePrice, c: data.closePrice, v: data.volume
       };
+      tickTracker = { count: 0, upTicks: 0, downTicks: 0, lastPrice: data.closePrice };
       updateWarmupUI();
       return;
     }
+    // Guardar métricas de tick volume en la vela que cierra
+    currentCandle.ticks = tickTracker.count;
+    currentCandle.deltaUp = tickTracker.upTicks;
+    currentCandle.deltaDown = tickTracker.downTicks;
+
     candles.push({ ...currentCandle });
     if (candles.length > MAX_CANDLES) candles.shift();
 
@@ -2557,15 +2580,18 @@ function onTick(data) {
     updateTrend(); // Actualizar tendencia con cada vela cerrada
     checkTradeResults(currentCandle);
     checkSafeStop(); // Verificar si podemos parar después de cerrar vela y procesar resultados
-    
+
     pendingSignal = null;
     tradeExecutedThisCandle = false;
     lastTradeType = null;
-    
+
     currentCandle = {
       s: candleTime, o: data.closePrice, h: data.closePrice,
       l: data.closePrice, c: data.closePrice, v: data.volume
     };
+
+    // Reset tick tracker para nueva vela
+    tickTracker = { count: 0, upTicks: 0, downTicks: 0, lastPrice: data.closePrice };
     
     // Martingala V16: Verificar condiciones INTELIGENTES antes de ejecutar
     if (activeMartingaleTrade && config.useMartingale) {
@@ -2645,11 +2671,19 @@ function onTick(data) {
       }
     }
   } else {
-    // Tick durante vela en formación - solo actualizar OHLCV
+    // Tick durante vela en formación - actualizar OHLCV + tracking de ticks
     currentCandle.c = data.closePrice;
     currentCandle.h = Math.max(currentCandle.h, data.closePrice);
     currentCandle.l = Math.min(currentCandle.l, data.closePrice);
     currentCandle.v = data.volume;
+
+    // Tick Volume: clasificar cada tick como comprador o vendedor
+    tickTracker.count++;
+    if (tickTracker.lastPrice > 0) {
+      if (data.closePrice > tickTracker.lastPrice) tickTracker.upTicks++;
+      else if (data.closePrice < tickTracker.lastPrice) tickTracker.downTicks++;
+    }
+    tickTracker.lastPrice = data.closePrice;
   }
   
   const now = Date.now() + config.timeOffset;
@@ -2665,8 +2699,8 @@ function updateSignalUI(sec, key) {
   if (!isSystemWarmedUp) {
     DOM.signalBox.className = 'sig-waiting';
     DOM.signalStatus.innerHTML = `
-      <div class="signal-title" style="color:#ff00ff;font-size:12px">CARGANDO DATOS</div>
-      <div class="signal-subtitle" style="color:#00ffff;font-size:9px">${systemWarmupLevel}% - Detectando S/R...</div>`;
+      <div class="signal-title" style="color:#ff00ff;font-size:12px">CALIBRANDO VOLUMEN</div>
+      <div class="signal-subtitle" style="color:#00ffff;font-size:9px">${systemWarmupLevel}% - Recopilando ticks...</div>`;
     return;
   }
 
@@ -2699,8 +2733,8 @@ function updateSignalUI(sec, key) {
     } else {
         DOM.signalBox.className = 'sig-waiting';
         DOM.signalStatus.innerHTML = `
-        <div class="signal-title" style="color:#00ffff;font-size:11px">ANALIZANDO MERCADO</div>
-        <div class="signal-subtitle" style="color:#888;font-size:9px">Buscando oportunidades...</div>`;
+        <div class="signal-title" style="color:#00ffff;font-size:11px">ANALIZANDO VOLUMEN</div>
+        <div class="signal-subtitle" style="color:#888;font-size:9px">Escaneando actividad de ticks...</div>`;
     }
   }
 }
@@ -2754,8 +2788,8 @@ function updateBotUI() {
       // Sistema cargando
       DOM.signalBox.className = 'sig-waiting';
       DOM.signalStatus.innerHTML = `
-        <div class="signal-title" style="color:#ff00ff;font-size:12px">CARGANDO DATOS</div>
-        <div class="signal-subtitle" style="color:#00ffff;font-size:9px">${systemWarmupLevel}% - Detectando S/R...</div>`;
+        <div class="signal-title" style="color:#ff00ff;font-size:12px">CALIBRANDO VOLUMEN</div>
+        <div class="signal-subtitle" style="color:#00ffff;font-size:9px">${systemWarmupLevel}% - Recopilando ticks...</div>`;
     } else if (tradeExecutedThisCandle || pendingTrades.length > 0) {
       // Trade en progreso
       const isCall = lastTradeType === 'call';
