@@ -8,8 +8,8 @@ console.log('%c WORBIT SNIPER V15.0 LOADING...', 'background: #00e676; color: #0
 const VERSION = '15.0';
 const TARGET_CANDLES = 2;
 const TARGET_CANDLES_FULL = 3;
-const MIN_CANDLES_FOR_VOLUME = 5;   // Mínimo de velas para calcular promedios de volumen
-const WARMUP_EFFECTIVE_TARGET = 5;  // Velas reales para que el sistema esté listo
+const MIN_CANDLES_FOR_VOLUME = 2;   // Mínimo de velas para calcular promedios de volumen
+const WARMUP_EFFECTIVE_TARGET = 2;  // Velas reales para que el sistema esté listo
 const MAX_CANDLES = 200;
 const MAX_LOGS = 50; // Aumentado para ver más historial
 const HEALTH_CHECK_INTERVAL = 3000;
@@ -2387,43 +2387,33 @@ function detectSignal() {
   const now = analysisCandles[i];
 
   // Necesita datos de ticks válidos
-  if (!now.ticks || now.ticks < 10) {
-    logMonitor(`📊 Vela con pocos ticks (${now.ticks || 0}) - insuficiente para análisis`, 'info');
+  if (!now.ticks || now.ticks < 5) {
+    logMonitor(`📊 Vela con pocos ticks (${now.ticks || 0}) - insuficiente`, 'info');
     return null;
   }
 
   // === CALCULAR PROMEDIOS DE REFERENCIA (últimas 20 velas) ===
   const lookback = Math.min(20, i);
   const recent = analysisCandles.slice(i - lookback, i);
+  if (recent.length < 1) return null;
 
-  // Solo velas que tengan datos de ticks
-  const withTicks = recent.filter(c => c.ticks && c.ticks > 0);
-  if (withTicks.length < 3) return null;
-
-  // 1. Promedio de rango (H-L) - reemplaza tick volume (inútil en OTC, tasa fija ~59t/min)
-  const avgRange = recent.reduce((a, c) => a + (c.h - c.l), 0) / recent.length;
-
-  // 2. Promedio de body (tamaño del cuerpo)
+  // Promedio de body (tamaño del cuerpo) - ÚNICO indicador fiable en OTC
   const avgBody = recent.reduce((a, c) => a + Math.abs(c.c - c.o), 0) / recent.length;
 
   // === MÉTRICAS DE LA VELA ACTUAL ===
   const body = Math.abs(now.c - now.o);
-  const range = now.h - now.l;
   const totalDirectional = now.deltaUp + now.deltaDown;
   const dominantUp = now.deltaUp > now.deltaDown;
   const deltaRatio = totalDirectional > 0
     ? Math.max(now.deltaUp, now.deltaDown) / totalDirectional
     : 0;
 
-  // === TRES FILTROS (adaptados para OTC) ===
-  const rangeRatio = avgRange > 0 ? range / avgRange : 0;
+  // === DOS FILTROS + CONFIRMACIÓN (OTC: tick count y range son constantes) ===
   const bodyRatio = avgBody > 0 ? body / avgBody : 0;
 
-  const RANGE_MULT = 1.3;          // Rango >= 1.3x promedio (actividad real del precio)
   const MOMENTUM_MULT = 1.8;       // Body >= 1.8x promedio (movimiento direccional fuerte)
-  const DELTA_THRESHOLD = 0.57;    // >= 57% ticks en una dirección (OTC tiene rango estrecho)
+  const DELTA_THRESHOLD = 0.57;    // >= 57% ticks en una dirección (OTC tiene rango 50-62%)
 
-  const rangeHigh = rangeRatio >= RANGE_MULT;
   const momentumStrong = bodyRatio >= MOMENTUM_MULT;
   const deltaExtreme = deltaRatio >= DELTA_THRESHOLD;
 
@@ -2435,14 +2425,13 @@ function detectSignal() {
                          (direction === 'put' && isRed(now));
 
   // === LOG DIAGNÓSTICO (1 vez por vela cerrada) ===
-  const rngIcon = rangeHigh ? '✓' : '✗';
   const momIcon = momentumStrong ? '✓' : '✗';
   const delIcon = deltaExtreme ? '✓' : '✗';
   const colIcon = candleConfirms ? '✓' : '✗';
-  logMonitor(`📊 Rng:${range.toFixed(2)} (avg:${avgRange.toFixed(2)} x${rangeRatio.toFixed(1)}) | Body:${body.toFixed(2)} (avg:${avgBody.toFixed(2)} x${bodyRatio.toFixed(1)}) | Delta:${(deltaRatio*100).toFixed(0)}%${dominantUp ? '↑' : '↓'} | ${rngIcon}Rng ${momIcon}Mom ${delIcon}Del ${colIcon}Col`, 'info');
+  logMonitor(`📊 Body:${body.toFixed(2)} (avg:${avgBody.toFixed(2)} x${bodyRatio.toFixed(1)}) | Delta:${(deltaRatio*100).toFixed(0)}%${dominantUp ? '↑' : '↓'} | ${momIcon}Mom ${delIcon}Del ${colIcon}Col | Trend:${currentTrend.toUpperCase()}`, 'info');
 
-  // === SEÑAL: todas las condiciones deben cumplirse ===
-  if (rangeHigh && momentumStrong && deltaExtreme && candleConfirms) {
+  // === SEÑAL: Momentum + Delta + Color deben cumplirse ===
+  if (momentumStrong && deltaExtreme && candleConfirms) {
     let signal = direction;
     let strategy = `Volumen ${signal === 'call' ? 'Alcista' : 'Bajista'}`;
 
@@ -2475,7 +2464,7 @@ function detectSignal() {
       note = ' (INV)';
     }
 
-    logMonitor(`🚀 ${strategy} → ${displayType.toUpperCase()}${note} | Rng:x${rangeRatio.toFixed(1)} | Mom:x${bodyRatio.toFixed(1)} | Delta:${(deltaRatio*100).toFixed(0)}%`, 'pattern');
+    logMonitor(`🚀 ${strategy} → ${displayType.toUpperCase()}${note} | Mom:x${bodyRatio.toFixed(1)} | Delta:${(deltaRatio*100).toFixed(0)}%`, 'pattern');
     return { d: signal, strategy: strategy };
   }
 
