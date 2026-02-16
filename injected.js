@@ -367,6 +367,7 @@ let wsConnected = false;
 let lastWsData = null;
 let lastTradeTime = 0;             // Timestamp del último trade ejecutado
 let consecutiveLosses = 0;         // Contador de pérdidas consecutivas
+let lastTradeCandle = 0;           // Timestamp de la vela del último trade (para cooldown)
 
 // ============= TICK VOLUME TRACKER =============
 let tickTracker = {
@@ -949,6 +950,7 @@ function startBot() {
   pendingTrades = [];
   consecutiveLosses = 0;
   tickTracker = { count: 0, upTicks: 0, downTicks: 0, lastPrice: 0 };
+  lastTradeCandle = 0;
 
   setupWebSocketInterceptor();
 
@@ -1677,10 +1679,9 @@ function processWebSocketMessage(data) {
         const matches = data.match(/"balance":\s*([\d.]+)/);
         if (matches && matches[1]) {
             const bal = parseFloat(matches[1]);
-            if (!isNaN(bal)) {
+            if (!isNaN(bal) && Math.abs(bal - balance) > 0.01) {
                 balance = bal;
                 balanceLoaded = true;
-                logMonitor(`✓ Saldo actualizado (WS): $${balance.toFixed(2)}`, 'success');
                 if (DOM.accBal) DOM.accBal.textContent = `$${balance.toFixed(2)}`;
             }
         }
@@ -2386,6 +2387,14 @@ function detectSignal() {
   const i = analysisCandles.length - 1;
   const now = analysisCandles[i];
 
+  // SNIPER: Cooldown de 2 velas después de cualquier trade (evitar perseguir movimientos agotados)
+  if (lastTradeCandle > 0) {
+    const candlesSinceTrade = Math.floor((now.s - lastTradeCandle) / 60000);
+    if (candlesSinceTrade < 2) {
+      return null;
+    }
+  }
+
   // Necesita datos de ticks válidos
   if (!now.ticks || now.ticks < 5) {
     logMonitor(`📊 Vela con pocos ticks (${now.ticks || 0}) - insuficiente`, 'info');
@@ -2435,24 +2444,28 @@ function detectSignal() {
     let signal = direction;
     let strategy = `Volumen ${signal === 'call' ? 'Alcista' : 'Bajista'}`;
 
-    // Filtro de tendencia automático
+    // SNIPER: Solo operar CON tendencia clara - NEUTRAL = sin edge
+    if (currentTrend === 'neutral') {
+      logMonitor(`⏸ Señal ${signal.toUpperCase()} bloqueada: tendencia NEUTRAL (sin edge)`, 'info');
+      return null;
+    }
     if (currentTrend === 'bearish' && signal === 'call') {
-      logMonitor(`⚠ CALL bloqueada: tendencia BAJISTA`, 'info');
+      logMonitor(`⏸ CALL bloqueada: tendencia BAJISTA`, 'info');
       return null;
     }
     if (currentTrend === 'bullish' && signal === 'put') {
-      logMonitor(`⚠ PUT bloqueada: tendencia ALCISTA`, 'info');
+      logMonitor(`⏸ PUT bloqueada: tendencia ALCISTA`, 'info');
       return null;
     }
 
-    // Filtro de tendencia manual
+    // Filtro de tendencia manual (adicional)
     if (config.trendFilter !== 'off') {
       if (config.trendFilter === 'bullish' && signal === 'put') {
-        logMonitor(`⚠ PUT bloqueada: Filtro tendencia ALCISTA`, 'info');
+        logMonitor(`⏸ PUT bloqueada: Filtro manual ALCISTA`, 'info');
         return null;
       }
       if (config.trendFilter === 'bearish' && signal === 'call') {
-        logMonitor(`⚠ CALL bloqueada: Filtro tendencia BAJISTA`, 'info');
+        logMonitor(`⏸ CALL bloqueada: Filtro manual BAJISTA`, 'info');
         return null;
       }
     }
@@ -2627,6 +2640,7 @@ function onTick(data) {
             executeTrade(mgType);
             const entryPrice = getCurrentPrice();
             pendingTrades.push({ k: currentCandle.s, type: mgType, entryPrice: entryPrice, ts: Date.now() });
+            lastTradeCandle = currentCandle.s; // Cooldown: registrar vela del trade
             tradeExecutedThisCandle = true;
             lastTradeType = mgType;
           }, 500);
@@ -2653,6 +2667,7 @@ function onTick(data) {
           if (!pendingTrades.some(t => t.k === tKey)) {
             const entryPrice = getCurrentPrice();
             pendingTrades.push({ k: tKey, type: type, entryPrice: entryPrice, ts: Date.now() });
+            lastTradeCandle = tKey; // Cooldown: registrar vela del trade
             logMonitor(`📌 Trade: ${type.toUpperCase()} @ ${entryPrice.toFixed(2)}`, 'success');
             if (config.autoTrade) executeTrade(type);
             else logMonitor(`Señal manual: ${type.toUpperCase()} @ ${entryPrice}`, 'success');
