@@ -2400,29 +2400,30 @@ function detectSignal() {
   const withTicks = recent.filter(c => c.ticks && c.ticks > 0);
   if (withTicks.length < 3) return null;
 
-  // 1. Promedio de ticks por vela
-  const avgTicks = withTicks.reduce((a, c) => a + c.ticks, 0) / withTicks.length;
+  // 1. Promedio de rango (H-L) - reemplaza tick volume (inútil en OTC, tasa fija ~59t/min)
+  const avgRange = recent.reduce((a, c) => a + (c.h - c.l), 0) / recent.length;
 
   // 2. Promedio de body (tamaño del cuerpo)
   const avgBody = recent.reduce((a, c) => a + Math.abs(c.c - c.o), 0) / recent.length;
 
   // === MÉTRICAS DE LA VELA ACTUAL ===
   const body = Math.abs(now.c - now.o);
+  const range = now.h - now.l;
   const totalDirectional = now.deltaUp + now.deltaDown;
   const dominantUp = now.deltaUp > now.deltaDown;
   const deltaRatio = totalDirectional > 0
     ? Math.max(now.deltaUp, now.deltaDown) / totalDirectional
     : 0;
 
-  // === TRES FILTROS ===
-  const tickRatio = avgTicks > 0 ? now.ticks / avgTicks : 0;
+  // === TRES FILTROS (adaptados para OTC) ===
+  const rangeRatio = avgRange > 0 ? range / avgRange : 0;
   const bodyRatio = avgBody > 0 ? body / avgBody : 0;
 
-  const TICK_VOLUME_MULT = 1.5;   // Ticks >= 1.5x promedio
-  const MOMENTUM_MULT = 1.8;      // Body >= 1.8x promedio
-  const DELTA_THRESHOLD = 0.62;   // >= 62% ticks en una dirección
+  const RANGE_MULT = 1.3;          // Rango >= 1.3x promedio (actividad real del precio)
+  const MOMENTUM_MULT = 1.8;       // Body >= 1.8x promedio (movimiento direccional fuerte)
+  const DELTA_THRESHOLD = 0.57;    // >= 57% ticks en una dirección (OTC tiene rango estrecho)
 
-  const tickVolumeHigh = tickRatio >= TICK_VOLUME_MULT;
+  const rangeHigh = rangeRatio >= RANGE_MULT;
   const momentumStrong = bodyRatio >= MOMENTUM_MULT;
   const deltaExtreme = deltaRatio >= DELTA_THRESHOLD;
 
@@ -2434,14 +2435,14 @@ function detectSignal() {
                          (direction === 'put' && isRed(now));
 
   // === LOG DIAGNÓSTICO (1 vez por vela cerrada) ===
-  const volIcon = tickVolumeHigh ? '✓' : '✗';
+  const rngIcon = rangeHigh ? '✓' : '✗';
   const momIcon = momentumStrong ? '✓' : '✗';
   const delIcon = deltaExtreme ? '✓' : '✗';
   const colIcon = candleConfirms ? '✓' : '✗';
-  logMonitor(`📊 ${now.ticks}t (avg:${avgTicks.toFixed(0)} x${tickRatio.toFixed(1)}) | Body:${body.toFixed(2)} (avg:${avgBody.toFixed(2)} x${bodyRatio.toFixed(1)}) | Delta:${(deltaRatio*100).toFixed(0)}%${dominantUp ? '↑' : '↓'} | ${volIcon}Vol ${momIcon}Mom ${delIcon}Del ${colIcon}Col`, 'info');
+  logMonitor(`📊 Rng:${range.toFixed(2)} (avg:${avgRange.toFixed(2)} x${rangeRatio.toFixed(1)}) | Body:${body.toFixed(2)} (avg:${avgBody.toFixed(2)} x${bodyRatio.toFixed(1)}) | Delta:${(deltaRatio*100).toFixed(0)}%${dominantUp ? '↑' : '↓'} | ${rngIcon}Rng ${momIcon}Mom ${delIcon}Del ${colIcon}Col`, 'info');
 
   // === SEÑAL: todas las condiciones deben cumplirse ===
-  if (tickVolumeHigh && momentumStrong && deltaExtreme && candleConfirms) {
+  if (rangeHigh && momentumStrong && deltaExtreme && candleConfirms) {
     let signal = direction;
     let strategy = `Volumen ${signal === 'call' ? 'Alcista' : 'Bajista'}`;
 
@@ -2474,7 +2475,7 @@ function detectSignal() {
       note = ' (INV)';
     }
 
-    logMonitor(`🚀 ${strategy} → ${displayType.toUpperCase()}${note} | ${now.ticks}t | Delta:${(deltaRatio*100).toFixed(0)}% | Mom:x${bodyRatio.toFixed(1)}`, 'pattern');
+    logMonitor(`🚀 ${strategy} → ${displayType.toUpperCase()}${note} | Rng:x${rangeRatio.toFixed(1)} | Mom:x${bodyRatio.toFixed(1)} | Delta:${(deltaRatio*100).toFixed(0)}%`, 'pattern');
     return { d: signal, strategy: strategy };
   }
 
