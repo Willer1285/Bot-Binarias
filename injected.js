@@ -147,6 +147,9 @@ const HUD_HTML = `
     <div class="stat-item"><div class="stat-val loss" id="ui-l">0</div><div class="stat-label">Perdidas</div></div>
     <div class="stat-item"><div class="stat-val" id="ui-wr">--%</div><div class="stat-label">Win Rate</div></div>
   </div>
+  <div class="stats-row" style="margin-top:2px">
+    <div class="stat-item"><div class="stat-val" id="ui-session-pl" style="color:#888;font-size:11px">$0.00</div><div class="stat-label">Sesión P/L</div></div>
+  </div>
 
   <div class="section-header" id="config-header">
     <span class="section-title">⚙️ CONFIGURACIÓN</span>
@@ -243,6 +246,20 @@ const HUD_HTML = `
         <input type="number" class="config-input" id="max-losses" value="3" min="1" max="100">
       </div>
     </div>
+    <div class="switch-box" id="sw-money">
+      <span class="switch-label">Por Monto ($)</span>
+      <div class="switch-toggle"></div>
+    </div>
+    <div class="stop-group disabled-group" id="grp-money">
+      <div class="config-row">
+        <span class="config-label">TP en $</span>
+        <input type="number" class="config-input" id="profit-money" value="0" min="0" max="100000" step="0.5">
+      </div>
+      <div class="config-row">
+        <span class="config-label">SL en $</span>
+        <input type="number" class="config-input" id="stop-loss-money" value="0" min="0" max="100000" step="0.5">
+      </div>
+    </div>
   </div>
 
   <div class="timer-section">
@@ -312,13 +329,16 @@ let config = {
   timeOffset: 0,
   stopConfig: {
     useTime: false,
-    timeMin: 0,
+    timeMin: 60,
     useRisk: false,
-    profitPct: 0,
-    stopLossPct: 0,
+    profitPct: 10,
+    stopLossPct: 10,
     useTrades: false,
-    maxWins: 0,
-    maxLosses: 0
+    maxWins: 5,
+    maxLosses: 3,
+    useMoney: false,
+    profitMoney: 0,
+    stopLossMoney: 0
   }
 };
 
@@ -542,6 +562,13 @@ function updateStats() {
   const wr = total > 0 ? ((stats.w / total) * 100).toFixed(0) : '--';
   if (DOM.uiWr) DOM.uiWr.textContent = `${wr}%`;
   if (DOM.uiMg) DOM.uiMg.textContent = mgLevel;
+  // Session P/L
+  if (DOM.uiSessionPL && initialBalance > 0) {
+    const pl = balance - initialBalance;
+    const sign = pl >= 0 ? '+' : '';
+    DOM.uiSessionPL.textContent = `${sign}$${pl.toFixed(2)}`;
+    DOM.uiSessionPL.style.color = pl > 0 ? '#00ff88' : pl < 0 ? '#ff5555' : '#888';
+  }
 }
 
 function updateWarmupUI() {
@@ -794,6 +821,24 @@ function checkSafeStop() {
       return;
     }
   }
+
+  if (sc.useMoney && initialBalance > 0) {
+    const sessionProfit = balance - initialBalance;
+    if (sc.profitMoney > 0 && sessionProfit >= sc.profitMoney) {
+      isStopPending = true;
+      stopPendingReason = `TP Meta $${sc.profitMoney} (Ganancia: +$${sessionProfit.toFixed(2)})`;
+      logMonitor(`💰 Meta de ganancia alcanzada: +$${sessionProfit.toFixed(2)}`, 'success');
+      stopBot();
+      return;
+    }
+    if (sc.stopLossMoney > 0 && sessionProfit <= -sc.stopLossMoney) {
+      isStopPending = true;
+      stopPendingReason = `SL Meta $${sc.stopLossMoney} (Pérdida: -$${Math.abs(sessionProfit).toFixed(2)})`;
+      logMonitor(`⛔ Límite de pérdida alcanzado: -$${Math.abs(sessionProfit).toFixed(2)}`, 'blocked');
+      stopBot();
+      return;
+    }
+  }
 }
 
 function shouldExecuteMartingale(tradeType) {
@@ -927,6 +972,17 @@ function startBot() {
   logMonitor('🟢 Sistema iniciado', 'success');
   logMonitor(`Balance: $${balance.toFixed(2)} | Riesgo: ${config.riskPct}% | Monto: $${currentAmt.toFixed(2)}`, 'info');
   logMonitor(`AutoTrade: ${config.autoTrade ? 'ON' : 'OFF'} | MG: ${config.useMartingale ? 'ON' : 'OFF'}`, 'info');
+
+  // Log de stops activos
+  const sc = config.stopConfig;
+  const activeStops = [];
+  if (sc.useTime) activeStops.push(`Tiempo: ${sc.timeMin}min`);
+  if (sc.useRisk) activeStops.push(`TP: +${sc.profitPct}% / SL: -${sc.stopLossPct}%`);
+  if (sc.useTrades) activeStops.push(`Wins: ${sc.maxWins} / Losses: ${sc.maxLosses}`);
+  if (sc.useMoney) activeStops.push(`TP: +$${sc.profitMoney} / SL: -$${sc.stopLossMoney}`);
+  if (activeStops.length > 0) {
+    logMonitor(`Stops: ${activeStops.join(' | ')}`, 'info');
+  }
 }
 
 // ============= FUNCIONES DE ESTADO (Movidias arriba para evitar ReferenceError) =============
@@ -1057,6 +1113,7 @@ function initSystem() {
       uiW: $('ui-w'),
       uiL: $('ui-l'),
       uiWr: $('ui-wr'),
+      uiSessionPL: $('ui-session-pl'),
       // Timer
       timerText: $('timer-text'),
       timerFill: $('timer-bar-fill'),
@@ -1078,6 +1135,10 @@ function initSystem() {
       stopLoss: $('stop-loss'),
       maxWins: $('max-wins'),
       maxLosses: $('max-losses'),
+      swMoney: $('sw-money'),
+      grpMoney: $('grp-money'),
+      profitMoney: $('profit-money'),
+      stopLossMoney: $('stop-loss-money'),
       // V12: Elementos de warmup (ahora dentro del signal-box)
       warmupContainer: $('warmup-container'),
       warmupText: $('warmup-text'),
@@ -1235,7 +1296,21 @@ function initSystem() {
       config.stopConfig.maxLosses = parseInt(this.value) || 0;
       saveConfigToStorage();
     };
-    
+    if (DOM.swMoney) DOM.swMoney.onclick = function() {
+      config.stopConfig.useMoney = !config.stopConfig.useMoney;
+      this.classList.toggle('active', config.stopConfig.useMoney);
+      DOM.grpMoney.classList.toggle('disabled-group', !config.stopConfig.useMoney);
+      saveConfigToStorage();
+    };
+    if (DOM.profitMoney) DOM.profitMoney.onchange = function() {
+      config.stopConfig.profitMoney = parseFloat(this.value) || 0;
+      saveConfigToStorage();
+    };
+    if (DOM.stopLossMoney) DOM.stopLossMoney.onchange = function() {
+      config.stopConfig.stopLossMoney = parseFloat(this.value) || 0;
+      saveConfigToStorage();
+    };
+
     if (DOM.closeBtn) DOM.closeBtn.onclick = () => {
       isVisible = false;
       DOM.hud.classList.remove('visible');
@@ -1747,20 +1822,32 @@ function applyConfigToUI() {
   // Corregido: Mostrar/ocultar la fila completa del contador de Martingala
   if (DOM.mgRow) DOM.mgRow.style.display = config.useMartingale ? 'grid' : 'none';
 
-  // Stop Config
+  // Stop Config - sincronizar defaults con config real
   if (config.stopConfig) {
-    if (DOM.swTime) DOM.swTime.classList.toggle('active', config.stopConfig.useTime);
-    if (DOM.swRisk) DOM.swRisk.classList.toggle('active', config.stopConfig.useRisk);
-    if (DOM.swTrades) DOM.swTrades.classList.toggle('active', config.stopConfig.useTrades);
-    if (DOM.sessionTime) DOM.sessionTime.value = config.stopConfig.timeMin || 60;
-    if (DOM.profitTarget) DOM.profitTarget.value = config.stopConfig.profitPct || 10;
-    if (DOM.stopLoss) DOM.stopLoss.value = config.stopConfig.stopLossPct || 10;
-    if (DOM.maxWins) DOM.maxWins.value = config.stopConfig.maxWins || 5;
-    if (DOM.maxLosses) DOM.maxLosses.value = config.stopConfig.maxLosses || 3;
+    const sc = config.stopConfig;
+    // Asegurar que los valores del config coincidan con lo que muestra la UI
+    if (!sc.timeMin) sc.timeMin = 60;
+    if (!sc.profitPct) sc.profitPct = 10;
+    if (!sc.stopLossPct) sc.stopLossPct = 10;
+    if (!sc.maxWins) sc.maxWins = 5;
+    if (!sc.maxLosses) sc.maxLosses = 3;
 
-    if (DOM.grpTime) DOM.grpTime.classList.toggle('disabled-group', !config.stopConfig.useTime);
-    if (DOM.grpRisk) DOM.grpRisk.classList.toggle('disabled-group', !config.stopConfig.useRisk);
-    if (DOM.grpTrades) DOM.grpTrades.classList.toggle('disabled-group', !config.stopConfig.useTrades);
+    if (DOM.swTime) DOM.swTime.classList.toggle('active', sc.useTime);
+    if (DOM.swRisk) DOM.swRisk.classList.toggle('active', sc.useRisk);
+    if (DOM.swTrades) DOM.swTrades.classList.toggle('active', sc.useTrades);
+    if (DOM.swMoney) DOM.swMoney.classList.toggle('active', sc.useMoney);
+    if (DOM.sessionTime) DOM.sessionTime.value = sc.timeMin;
+    if (DOM.profitTarget) DOM.profitTarget.value = sc.profitPct;
+    if (DOM.stopLoss) DOM.stopLoss.value = sc.stopLossPct;
+    if (DOM.maxWins) DOM.maxWins.value = sc.maxWins;
+    if (DOM.maxLosses) DOM.maxLosses.value = sc.maxLosses;
+    if (DOM.profitMoney) DOM.profitMoney.value = sc.profitMoney || 0;
+    if (DOM.stopLossMoney) DOM.stopLossMoney.value = sc.stopLossMoney || 0;
+
+    if (DOM.grpTime) DOM.grpTime.classList.toggle('disabled-group', !sc.useTime);
+    if (DOM.grpRisk) DOM.grpRisk.classList.toggle('disabled-group', !sc.useRisk);
+    if (DOM.grpTrades) DOM.grpTrades.classList.toggle('disabled-group', !sc.useTrades);
+    if (DOM.grpMoney) DOM.grpMoney.classList.toggle('disabled-group', !sc.useMoney);
   }
 }
 
