@@ -527,6 +527,11 @@ function readAccount() {
         lastLoggedBalance = balance;
         balanceLoaded = true;
       }
+      // Capturar initialBalance si aún no se tiene
+      if (isRunning && initialBalance === 0 && balance > 0) {
+        initialBalance = balance;
+        logMonitor(`Balance inicial capturado: $${initialBalance.toFixed(2)}`, 'info');
+      }
     }
 
     if (DOM.accType) {
@@ -556,6 +561,21 @@ function calcAmount() {
     multiplier = Math.pow(config.mgFactor, mgLevel);
   }
   currentAmt = Math.max(1, base * multiplier);
+
+  // Smart risk cap: si hay SL en $ activo, no arriesgar más de lo que queda disponible
+  const sc = config.stopConfig;
+  if (sc.useMoney && sc.stopLossMoney > 0 && initialBalance > 0) {
+    const currentLoss = initialBalance - balance; // cuánto ya se perdió (positivo = pérdida)
+    const remainingRisk = sc.stopLossMoney - currentLoss; // cuánto queda disponible para perder
+    if (remainingRisk <= 0) {
+      // Ya se alcanzó o superó el SL - no operar
+      currentAmt = 0;
+      logMonitor(`⛔ SL en $ alcanzado - sin presupuesto de riesgo`, 'blocked');
+    } else if (currentAmt > remainingRisk) {
+      logMonitor(`📉 Riesgo ajustado: $${currentAmt.toFixed(2)} → $${remainingRisk.toFixed(2)} (presupuesto restante)`, 'info');
+      currentAmt = remainingRisk;
+    }
+  }
 }
 
 function getCurrentPrice() {
@@ -1683,6 +1703,11 @@ function processWebSocketMessage(data) {
                 balance = bal;
                 balanceLoaded = true;
                 if (DOM.accBal) DOM.accBal.textContent = `$${balance.toFixed(2)}`;
+                // Si initialBalance no se capturó al inicio, capturarlo ahora
+                if (isRunning && initialBalance === 0) {
+                  initialBalance = bal;
+                  logMonitor(`Balance inicial capturado: $${initialBalance.toFixed(2)}`, 'info');
+                }
             }
         }
     } catch(e) {}
@@ -2782,6 +2807,28 @@ function updateBotUI() {
     const h = Math.floor(elapsed / 3600);
     const m = Math.floor((elapsed % 3600) / 60);
     DOM.uiRuntime.textContent = `${h.toString().padStart(2,'0')}h ${m.toString().padStart(2,'0')}m`;
+  }
+
+  // Actualizar Session P/L en tiempo real
+  if (DOM.uiSessionPL && initialBalance > 0 && balance > 0) {
+    const pl = balance - initialBalance;
+    const sign = pl >= 0 ? '+' : '';
+    DOM.uiSessionPL.textContent = `${sign}$${pl.toFixed(2)}`;
+    DOM.uiSessionPL.style.color = pl > 0 ? '#00ff88' : pl < 0 ? '#ff5555' : '#888';
+  }
+
+  // Verificar stops de dinero en tiempo real (no esperar a cierre de vela)
+  if (!isStopPending && initialBalance > 0 && balance > 0) {
+    const sc = config.stopConfig;
+    if (sc.useMoney) {
+      const sessionProfit = balance - initialBalance;
+      if (sc.profitMoney > 0 && sessionProfit >= sc.profitMoney) {
+        checkSafeStop();
+      }
+      if (sc.stopLossMoney > 0 && sessionProfit <= -sc.stopLossMoney) {
+        checkSafeStop();
+      }
+    }
   }
 
   // Actualizar Signal Box basado en estado
